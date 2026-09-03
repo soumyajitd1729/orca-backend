@@ -1,0 +1,16 @@
+Metadata-Version: 2.4
+Name: orca-backend
+Version: 0.1.0
+Summary: ORCA Backend — Marine Ecosystem Reasoning with Collaborative Agents
+Requires-Python: >=3.10
+Requires-Dist: fastapi>=0.110.0
+Requires-Dist: uvicorn[standard]>=0.27.0
+Requires-Dist: pydantic>=2.0.0
+Requires-Dist: pydantic-settings>=2.0.0
+Requires-Dist: sqlalchemy[asyncio]>=2.0.0
+Requires-Dist: aiosqlite>=0.19.0
+Requires-Dist: asyncpg>=0.29.0
+Provides-Extra: dev
+Requires-Dist: pytest>=8.0.0; extra == "dev"
+Requires-Dist: pytest-asyncio>=0.23.0; extra == "dev"
+Requires-Dist: httpx>=0.27.0; extra == "dev"
