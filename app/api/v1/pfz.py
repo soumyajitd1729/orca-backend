@@ -11,6 +11,7 @@ router = APIRouter()
 
 
 @router.get("/pfz-zones")
+@router.get("/pfz/nearby")
 async def list_pfz_zones(
     lat: float = Query(..., ge=-90.0, le=90.0, description="Latitude of the query point"),
     lon: float = Query(..., ge=-180.0, le=180.0, description="Longitude of the query point"),
