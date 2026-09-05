@@ -16,5 +16,12 @@ class Settings(BaseSettings):
     MOSDAC_API_BASE: str = ""
     IMD_API_BASE: str = ""
 
+    GROQ_API_KEY: str = ""
+    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    CHAT_TIMEOUT_SECONDS: float = 8.0
+    CHAT_MAX_RETRIES: int = 2
+    CACHE_STALE_THRESHOLD_SECONDS: int = 3600
+    MAX_CONCURRENT_AGENTS: int = 5
+
 
 settings = Settings()
