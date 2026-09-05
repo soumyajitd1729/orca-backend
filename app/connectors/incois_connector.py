@@ -21,6 +21,11 @@ AUTHENTICATION:
 RATE LIMITS:
 - Not documented. Treat as public data with fair-use expectations.
 
+SSL/TLS NOTE:
+- The INCOIS ERDDAP server does not send the GlobalSign RSA OV SSL CA 2018
+  intermediate certificate. This environment includes the intermediate in
+  `orca_ca_bundle.pem` and the connector uses it if present.
+
 EVIDENCE:
 - All numeric values returned by verified ERDDAP queries include source,
   variable, unit, valid_time, confidence, url_ref, and why_it_matters.
@@ -30,7 +35,10 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import ssl
 from datetime import datetime
+from pathlib import Path
 from typing import Any, Optional
 
 from app.connectors.base_connector import BaseConnector, ConnectorEvidence, ConnectorResult
@@ -40,6 +48,7 @@ logger = logging.getLogger("orca")
 INCOIS_ERDDAP_BASE = "https://erddap.incois.gov.in/erddap"
 INCOIS_PFZ_WEBGIS = "https://incois.gov.in/geoportal/MFASPFZ/index.html"
 INCOIS_OSF_URL = "https://incois.gov.in/oceanservices/osfforecast.jsp"
+INCOIS_CA_BUNDLE = Path(__file__).resolve().parent.parent.parent / "orca_ca_bundle.pem"
 
 WHY_IT_MATTERS = {
     "sst": "Sea surface temperature affects fish distribution and storm intensity.",
@@ -61,6 +70,9 @@ WHY_IT_MATTERS = {
 class IncoisConnector(BaseConnector):
     def __init__(self, base_url: str = INCOIS_ERDDAP_BASE) -> None:
         super().__init__(base_url=base_url)
+        self._ca_bundle: str | ssl.SSLContext = True
+        if INCOIS_CA_BUNDLE.exists():
+            self._ca_bundle = ssl.create_default_context(cafile=str(INCOIS_CA_BUNDLE))
 
     async def _fetch_data(self, **kwargs: Any) -> Any:
         raise NotImplementedError("Use search_datasets() or query_dataset() instead.")
@@ -75,7 +87,7 @@ class IncoisConnector(BaseConnector):
 
             import httpx
 
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=self.timeout, verify=self._ca_bundle) as client:
                 response = await client.get(full_url)
                 response.raise_for_status()
                 return ConnectorResult(
@@ -125,7 +137,7 @@ class IncoisConnector(BaseConnector):
                 f"?{var_csv}&{constraint_str}"
             )
 
-            async with httpx.AsyncClient(timeout=self.timeout) as client:
+            async with httpx.AsyncClient(timeout=self.timeout, verify=self._ca_bundle) as client:
                 response = await client.get(url)
                 response.raise_for_status()
                 payload = response.json()
