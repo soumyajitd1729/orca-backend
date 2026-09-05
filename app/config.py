@@ -12,9 +12,13 @@ class Settings(BaseSettings):
     CORS_ORIGINS: str = "http://localhost:8080"
     LOG_LEVEL: str = "INFO"
 
-    INCOIS_API_BASE: str = ""
-    MOSDAC_API_BASE: str = ""
-    IMD_API_BASE: str = ""
+    INCOIS_API_BASE: str = "https://erddap.incois.gov.in/erddap"
+    MOSDAC_API_BASE: str = "https://www.mosdac.gov.in"
+    IMD_API_BASE: str = "https://api.imd.gov.in/api/v1"
+
+    IMD_API_KEY: str = ""
+    MOSDAC_USERNAME: str = ""
+    MOSDAC_PASSWORD: str = ""
 
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "llama-3.3-70b-versatile"
@@ -22,6 +26,9 @@ class Settings(BaseSettings):
     CHAT_MAX_RETRIES: int = 2
     CACHE_STALE_THRESHOLD_SECONDS: int = 3600
     MAX_CONCURRENT_AGENTS: int = 5
+
+    CONNECTOR_TIMEOUT_SECONDS: float = 10.0
+    CONNECTOR_MAX_RETRIES: int = 2
 
 
 settings = Settings()

@@ -6,6 +6,7 @@ from datetime import datetime
 from typing import Any, Optional
 
 from app.agents.base_agent import BaseAgent, AgentResult
+from app.connectors.incois_connector import IncoisConnector
 from app.schemas.agent import AgentEvidence, AgentResultData
 from app.services import pfz_service
 
@@ -24,8 +25,13 @@ class PFZAgent(BaseAgent):
         started_at = datetime.utcnow()
         errors: list[str] = []
 
+        zones = []
+        source_status = "no_data"
+
         try:
             zones = await pfz_service.get_pfz_zones(lat, lon, radius_km, db)
+            if zones:
+                source_status = "live"
         except Exception as exc:
             logger.warning("PFZAgent failed to fetch PFZ zones: %s", exc)
             return AgentResultData(
@@ -42,17 +48,25 @@ class PFZAgent(BaseAgent):
             )
 
         if not zones:
+            connector = IncoisConnector()
+            pfz_result = connector.normalize_pfz_unavailable(
+                reason="no_verified_machine_readable_api_for_pfz_scores"
+            )
+            errors.extend(pfz_result.errors)
+            source_status = pfz_result.source_status
+
+        if not zones:
             return AgentResultData(
                 agent_name=self.name,
                 task_id=str(task_id),
                 status="no_data",
                 data=[],
                 evidence=[],
-                errors=[],
+                errors=errors,
                 started_at=started_at,
                 completed_at=datetime.utcnow(),
                 duration_ms=0.0,
-                source_status="no_data",
+                source_status=source_status,
             )
 
         evidence: list[AgentEvidence] = []
@@ -86,5 +100,5 @@ class PFZAgent(BaseAgent):
             started_at=started_at,
             completed_at=completed_at,
             duration_ms=round(duration_ms, 3),
-            source_status="live",
+            source_status=source_status,
         )
