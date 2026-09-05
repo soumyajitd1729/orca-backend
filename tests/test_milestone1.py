@@ -43,7 +43,7 @@ def test_settings_loads_groq_defaults():
     assert hasattr(settings, "CHAT_TIMEOUT_SECONDS")
     assert hasattr(settings, "CHAT_MAX_RETRIES")
     assert hasattr(settings, "CACHE_STALE_THRESHOLD_SECONDS")
-    assert settings.GROQ_MODEL == "llama-3.3-70b-versatile"
+    assert settings.GROQ_MODEL == "openai/gpt-oss-120b"
     assert settings.CHAT_TIMEOUT_SECONDS == 8.0
     assert settings.CHAT_MAX_RETRIES == 2
     assert settings.CACHE_STALE_THRESHOLD_SECONDS == 3600

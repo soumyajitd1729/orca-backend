@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import uuid
 from datetime import datetime
+from types import SimpleNamespace
 from typing import Any, Optional
 
 from app.agents.base_agent import BaseAgent, AgentResult
@@ -73,7 +74,7 @@ class WeatherAgent(BaseAgent):
                 normalized = connector.normalize_observations(connector_result.data)
                 if normalized.evidence:
                     observations = [
-                        type("Obs", (), ev.__dict__)() for ev in normalized.evidence
+                        SimpleNamespace(**ev.__dict__) for ev in normalized.evidence
                     ]
                     source_status = normalized.source_status
                     errors.extend(normalized.errors)
@@ -96,7 +97,12 @@ class WeatherAgent(BaseAgent):
         data: list[dict] = []
 
         for obs in observations:
-            obs_dict = obs.model_dump() if hasattr(obs, "model_dump") else dict(obs)
+            if hasattr(obs, "model_dump"):
+                obs_dict = obs.model_dump()
+            elif hasattr(obs, "__dict__"):
+                obs_dict = vars(obs)
+            else:
+                obs_dict = dict(obs) if hasattr(obs, "keys") else {}
             variable = (obs_dict.get("variable") or "").lower()
             evidence.append(
                 AgentEvidence(

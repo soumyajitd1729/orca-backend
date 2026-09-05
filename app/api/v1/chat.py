@@ -4,6 +4,7 @@ from typing import List, Optional, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 
+from app.agents.intent_agent import IntentAgent
 from app.db.session import get_db
 from app.envelope import build_envelope
 from app.orchestration.orchestrator import Orchestrator
@@ -57,8 +58,20 @@ async def chat_orchestration(
         normalized_intent=None,
     )
 
+    intent_agent = IntentAgent(name="intent")
+    intent_result = await intent_agent.run(
+        message=payload.message,
+        user_location=context.user_location,
+        user_lat=context.user_lat,
+        user_lon=context.user_lon,
+        requested_radius_km=context.requested_radius_km,
+    )
+    intent_data = intent_result.result.data if intent_result.result and hasattr(intent_result.result, "data") else {}
+    if not isinstance(intent_data, dict):
+        intent_data = {}
+
     intent = NormalizedIntent(
-        query_type="general",
+        query_type=intent_data.get("query_type", "general"),
         location_name=context.user_location,
         latitude=context.user_lat,
         longitude=context.user_lon,

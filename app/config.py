@@ -21,7 +21,7 @@ class Settings(BaseSettings):
     MOSDAC_PASSWORD: str = ""
 
     GROQ_API_KEY: str = ""
-    GROQ_MODEL: str = "llama-3.3-70b-versatile"
+    GROQ_MODEL: str = "openai/gpt-oss-120b"
     CHAT_TIMEOUT_SECONDS: float = 8.0
     CHAT_MAX_RETRIES: int = 2
     CACHE_STALE_THRESHOLD_SECONDS: int = 3600
