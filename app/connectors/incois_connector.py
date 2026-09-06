@@ -231,10 +231,41 @@ class IncoisConnector(BaseConnector):
             )
 
     def select_observation_dataset(self, search_result: ConnectorResult) -> dict | None:
-        if search_result.status != "success" or not isinstance(search_result.data, dict):
+        if search_result.status != "success" or not search_result.data:
             return None
 
-        table = search_result.data.get("table", {})
+        data = search_result.data
+
+        if isinstance(data, list):
+            candidates = []
+            for item in data:
+                if not isinstance(item, dict):
+                    continue
+                dataset_id = str(item.get("datasetID") or item.get("dataset_id") or "").strip()
+                if not dataset_id or dataset_id.lower() in {"alldatasets", "alldatasets"}:
+                    continue
+                url = str(item.get("url") or item.get("publicUrl") or item.get("accessUrl") or "")
+                if "/tabledap/" in url:
+                    candidates.append((dataset_id, url, "tabledap"))
+                elif "/griddap/" in url:
+                    candidates.append((dataset_id, url, "griddap"))
+            if not candidates:
+                return None
+            tabledap_candidates = [c for c in candidates if c[2] == "tabledap"]
+            if tabledap_candidates:
+                dataset_id, url, access_method = tabledap_candidates[0]
+            else:
+                dataset_id, url, access_method = candidates[0]
+            return {
+                "dataset_id": dataset_id,
+                "url": url,
+                "access_method": access_method,
+            }
+
+        if not isinstance(data, dict):
+            return None
+
+        table = data.get("table", {})
         rows = table.get("rows", [])
         if not rows:
             return None
@@ -245,13 +276,19 @@ class IncoisConnector(BaseConnector):
         for row in rows:
             if not isinstance(row, list) or len(row) < 2:
                 continue
-            dataset_id = str(row[-1]) if row[-1] else ""
+            dataset_id = ""
+            row_url = ""
+            for cell in row:
+                cell_str = str(cell) if cell else ""
+                if "/tabledap/" in cell_str or "/griddap/" in cell_str:
+                    row_url = cell_str
+                if isinstance(cell, str) and cell.strip() and not dataset_id:
+                    dataset_id = cell.strip()
             if not dataset_id:
                 continue
             if dataset_id.lower() in {"alldatasets", "allDatasets"}:
                 continue
 
-            row_url = next((str(cell) for cell in row if isinstance(cell, str) and ("/tabledap/" in cell or "/griddap/" in cell)), "")
             if not row_url:
                 continue
 
@@ -264,8 +301,14 @@ class IncoisConnector(BaseConnector):
         if not dataset_row:
             return None
 
-        row_url = next((str(cell) for cell in dataset_row if isinstance(cell, str) and ("/tabledap/" in cell or "/griddap/" in cell)), "")
-        dataset_id = str(dataset_row[-1]) if dataset_row[-1] else ""
+        row_url = ""
+        dataset_id = ""
+        for cell in dataset_row:
+            cell_str = str(cell) if cell else ""
+            if "/tabledap/" in cell_str or "/griddap/" in cell_str:
+                row_url = cell_str
+            if isinstance(cell, str) and cell.strip() and not dataset_id:
+                dataset_id = cell.strip()
 
         if not dataset_id or not row_url:
             return None

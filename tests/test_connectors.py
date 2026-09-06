@@ -276,3 +276,128 @@ async def test_connector_retry_on_exception():
     assert result.status == "error"
     assert result.source_status == "unavailable"
     assert "boom" in result.errors[0]
+
+
+def test_incois_select_observation_dataset_from_list_prefers_tabledap():
+    connector = IncoisConnector()
+    search_result = ConnectorResult(
+        status="success",
+        data=[
+            {"datasetID": "griddap_set", "url": "/erddap/griddap/griddap_set.html"},
+            {"datasetID": "tabledap_set", "url": "/erddap/tabledap/tabledap_set.html"},
+        ],
+        source_status="live",
+    )
+    result = connector.select_observation_dataset(search_result)
+    assert result is not None
+    assert result["dataset_id"] == "tabledap_set"
+    assert result["access_method"] == "tabledap"
+
+
+def test_incois_select_observation_dataset_from_list_falls_back_to_griddap():
+    connector = IncoisConnector()
+    search_result = ConnectorResult(
+        status="success",
+        data=[
+            {"datasetID": "griddap_set", "url": "/erddap/griddap/griddap_set.html"},
+        ],
+        source_status="live",
+    )
+    result = connector.select_observation_dataset(search_result)
+    assert result is not None
+    assert result["dataset_id"] == "griddap_set"
+    assert result["access_method"] == "griddap"
+
+
+def test_incois_select_observation_dataset_list_skips_alldatasets():
+    connector = IncoisConnector()
+    search_result = ConnectorResult(
+        status="success",
+        data=[
+            {"datasetID": "allDatasets", "url": "/erddap/tabledap/alldatasets.html"},
+            {"datasetID": "tabledap_set", "url": "/erddap/tabledap/tabledap_set.html"},
+        ],
+        source_status="live",
+    )
+    result = connector.select_observation_dataset(search_result)
+    assert result is not None
+    assert result["dataset_id"] == "tabledap_set"
+
+
+def test_incois_select_observation_dataset_list_no_match():
+    connector = IncoisConnector()
+    search_result = ConnectorResult(
+        status="success",
+        data=[
+            {"datasetID": "allDatasets", "url": "/erddap/tabledap/alldatasets.html"},
+        ],
+        source_status="live",
+    )
+    result = connector.select_observation_dataset(search_result)
+    assert result is None
+
+
+def test_incois_select_observation_dataset_malformed_response():
+    connector = IncoisConnector()
+    assert connector.select_observation_dataset(ConnectorResult(status="success", data=None)) is None
+    assert connector.select_observation_dataset(ConnectorResult(status="success", data="not_a_list")) is None
+    assert connector.select_observation_dataset(ConnectorResult(status="success", data=123)) is None
+    assert connector.select_observation_dataset(ConnectorResult(status="success", data=[])) is None
+    assert connector.select_observation_dataset(ConnectorResult(status="success", data=[{"not_a_dataset": 1}])) is None
+
+
+def test_incois_select_observation_dataset_legacy_dict_format_still_works():
+    connector = IncoisConnector()
+    search_result = ConnectorResult(
+        status="success",
+        data={
+            "table": {
+                "rows": [
+                    ["incois_sst_1", "INCOIS SST", "/erddap/tabledap/incois_sst_1.html"],
+                ]
+            }
+        },
+        source_status="live",
+    )
+    result = connector.select_observation_dataset(search_result)
+    assert result is not None
+    assert result["dataset_id"] == "incois_sst_1"
+    assert result["access_method"] == "tabledap"
+
+
+@pytest.mark.asyncio
+async def test_incois_weather_agent_integration_with_list_search_response():
+    mock_search_result = ConnectorResult(
+        status="success",
+        data=[
+            {"datasetID": "incois_sst_2024", "url": "/erddap/tabledap/incois_sst_2024.html"},
+        ],
+        source_status="live",
+    )
+
+    mock_query_result = ConnectorResult(
+        status="success",
+        data={
+            "table": {
+                "columnNames": ["time", "latitude", "longitude", "TEMP", "PSAL"],
+                "columnUnits": ["", "degrees_north", "degrees_east", "degree_C", "PSU"],
+                "rows": [
+                    ["2024-01-01T00:00:00Z", 17.0, 83.0, 28.5, 32.0],
+                ],
+            }
+        },
+        evidence=[],
+        source_status="live",
+    )
+
+    from app.agents.weather_agent import WeatherAgent
+
+    with patch("app.agents.weather_agent.observations_service.get_observations", return_value=[]):
+        with patch.object(IncoisConnector, "search_datasets", new_callable=AsyncMock, return_value=mock_search_result):
+            with patch.object(IncoisConnector, "select_observation_dataset", return_value={"dataset_id": "incois_sst_2024", "access_method": "tabledap"}):
+                with patch.object(IncoisConnector, "query_dataset", new_callable=AsyncMock, return_value=mock_query_result):
+                    with patch.object(IncoisConnector, "normalize_observations", return_value=ConnectorResult(status="success", evidence=[], source_status="live")):
+                        agent = WeatherAgent(name="weather")
+                        result = await agent._execute(db=None, lat=17.0, lon=82.0, radius_km=10.0, variables=["TEMP", "PSAL"])
+
+    assert result.status == "no_data"
