@@ -42,6 +42,9 @@ class ResponseSynthesizer(BaseAgent):
         agent_results = agent_results or []
         follow_up_suggestions = follow_up_suggestions or []
 
+        failed_agents = [ar.get("agent_name") for ar in agent_results if ar.get("status") in ("error", "timeout", "failed")]
+        unavailable_agents = [ar.get("agent_name") for ar in agent_results if ar.get("status") in ("no_data", "unavailable")]
+
         if not groq_client._api_key:
             return AgentResultData(
                 agent_name=self.name,
@@ -75,6 +78,8 @@ class ResponseSynthesizer(BaseAgent):
                 warnings=warnings,
                 agent_results=agent_results,
                 follow_up_suggestions=follow_up_suggestions,
+                failed_agents=failed_agents,
+                unavailable_agents=unavailable_agents,
             )
         except Exception as exc:
             logger.warning("ResponseSynthesizer Groq call failed: %s", exc)
@@ -126,6 +131,8 @@ class ResponseSynthesizer(BaseAgent):
         warnings: list[dict],
         agent_results: list[dict],
         follow_up_suggestions: list[str],
+        failed_agents: Optional[list[str]] = None,
+        unavailable_agents: Optional[list[str]] = None,
     ) -> SynthesisResponse:
         system_prompt = (
             "You are a marine safety assistant for the ORCA system. "
@@ -133,6 +140,7 @@ class ResponseSynthesizer(BaseAgent):
             "Do NOT invent values, units, or safety assessments. "
             "Preserve all numeric values and units exactly as provided. "
             "If evidence is missing for a safety-critical claim, explicitly state that current safety cannot be confirmed. "
+            "If any data source was unavailable, clearly state that current safety cannot be fully confirmed. "
             "Respond with valid JSON only, no markdown."
         )
 
@@ -148,6 +156,9 @@ class ResponseSynthesizer(BaseAgent):
                 }
             )
 
+        failed_agents = failed_agents or []
+        unavailable_agents = unavailable_agents or []
+
         user_prompt = (
             f"User question: {user_message}\n"
             f"Language: {language}\n"
@@ -157,6 +168,8 @@ class ResponseSynthesizer(BaseAgent):
             f"Active warnings: {json.dumps(warnings, default=str)}\n"
             f"Evidence summary: {json.dumps(evidence_summary, default=str)}\n"
             f"Agent results: {json.dumps(agent_results, default=str)}\n"
+            f"Failed agents: {json.dumps(failed_agents)}\n"
+            f"Unavailable agents: {json.dumps(unavailable_agents)}\n"
             f"Follow-up suggestions: {json.dumps(follow_up_suggestions, default=str)}\n"
             "Return JSON with keys: "
             "answer (string), "

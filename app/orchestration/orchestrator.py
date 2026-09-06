@@ -41,6 +41,10 @@ class Orchestrator:
         self.agent_results: dict[str, AgentResult] = {}
         self.agent_trace: list[AgentTraceEntry] = []
         self.aggregated_evidence: list[AgentEvidence] = []
+        self.request_id: str | None = getattr(context, "request_id", None)
+        if self.request_id:
+            import app.resilience.logging as logging_utils
+            logging_utils.request_context.set(request_id=self.request_id)
 
     async def execute(self, intent: NormalizedIntent) -> OrchestrationResult:
         task_id = str(uuid.uuid4())
@@ -51,7 +55,13 @@ class Orchestrator:
         overall_status = "success"
 
         try:
-            await self._execute_plan(plan)
+            deadline = started_at + __import__("datetime").timedelta(
+                seconds=settings.CHAT_REQUEST_DEADLINE_SECONDS
+            )
+            await asyncio.wait_for(
+                self._execute_plan(plan),
+                timeout=settings.CHAT_REQUEST_DEADLINE_SECONDS,
+            )
         except asyncio.TimeoutError:
             overall_status = "timeout"
             errors.append("orchestration_timeout")
@@ -68,6 +78,8 @@ class Orchestrator:
                 if hasattr(agent_result, "status") and agent_result.status == "error":
                     overall_status = "error"
                     break
+
+        self._enforce_evidence_limits()
 
         safety_result = self._extract_safety_result()
         validation_result = self._extract_validation_result()
@@ -87,6 +99,7 @@ class Orchestrator:
             synthesis_result=synthesis_result,
             errors=errors,
             overall_status=overall_status,
+            request_id=self.request_id,
         )
 
     def _build_plan(self, intent: NormalizedIntent) -> ExecutionPlan:
@@ -167,6 +180,7 @@ class Orchestrator:
                         agent_result = result
                     self.agent_results[name] = agent_result
                     completed[name] = agent_result
+                    self._collect_evidence_from_agent(name, agent_result)
 
     async def _bounded_execute(self, name: str, step: PlanStep, deps: dict[str, AgentResult]) -> AgentResult:
         async with self.semaphore:
@@ -326,12 +340,14 @@ class Orchestrator:
                 if isinstance(p, dict):
                     pfz_list.append(p)
 
+        source_health = self._build_source_health(deps)
+
         safety_result = SafetyEngine.evaluate(
             warnings=warnings_list,
             observations=observations_list,
             pfz_zones=pfz_list,
             geofence_violations=geofence_violations,
-            source_health=None,
+            source_health=source_health,
         )
 
         evidence_items = []
@@ -366,9 +382,16 @@ class Orchestrator:
         claims = [
             EvidenceClaim(variable="wave_hazard_score", min_confidence=0.0),
             EvidenceClaim(variable="wind_hazard_score", min_confidence=0.0),
+            EvidenceClaim(variable="lightning_hazard_score", min_confidence=0.0),
+            EvidenceClaim(variable="geofence_hazard_score", min_confidence=0.0),
             EvidenceClaim(variable="warning", min_confidence=0.0),
             EvidenceClaim(variable="pfz_score", min_confidence=0.0),
             EvidenceClaim(variable="route_cost", min_confidence=0.0),
+            EvidenceClaim(variable="temperature", min_confidence=0.0),
+            EvidenceClaim(variable="salinity", min_confidence=0.0),
+            EvidenceClaim(variable="sst", min_confidence=0.0),
+            EvidenceClaim(variable="wave_height", min_confidence=0.0),
+            EvidenceClaim(variable="wind_speed", min_confidence=0.0),
         ]
 
         evidence_items = []
@@ -414,6 +437,10 @@ class Orchestrator:
                 if isinstance(w, dict):
                     warnings_list.append(w)
 
+        all_evidence = []
+        for item in self.aggregated_evidence:
+            all_evidence.append(item.model_dump() if hasattr(item, "model_dump") else dict(item))
+
         agent_results_summary = []
         for name, result in deps.items():
             agent_results_summary.append({
@@ -426,7 +453,7 @@ class Orchestrator:
         return await agent.run(
             user_message=self.context.user_message,
             language=self.context.language or "en",
-            evidence=validated_evidence,
+            evidence=all_evidence,
             safety_badge=getattr(safety_result, "safety_badge", None),
             fishing_suitability=getattr(safety_result, "fishing_suitability", None),
             hazard_breakdown={
@@ -506,9 +533,73 @@ class Orchestrator:
             ))
         return results
 
-    def _collect_errors(self) -> list[str]:
-        errors = []
-        for name, result in self.agent_results.items():
-            if hasattr(result, "error") and result.error:
-                errors.append(f"{name}: {result.error}")
-        return errors
+    def _build_source_health(self, deps: dict[str, AgentResult]) -> dict[str, Any]:
+        health: dict[str, Any] = {}
+        for name, result in deps.items():
+            if not hasattr(result, "result") or not result.result:
+                continue
+            agent_result_data = result.result
+            if hasattr(agent_result_data, "source_status"):
+                source_status = agent_result_data.source_status
+            elif hasattr(result, "status"):
+                source_status = result.status
+            else:
+                source_status = "unknown"
+            health[name] = {"status": source_status}
+        return health
+
+    def _enforce_evidence_limits(self) -> None:
+        max_evidence = getattr(settings, "MAX_AGGREGATED_EVIDENCE", 500)
+        if len(self.aggregated_evidence) > max_evidence:
+            logger.warning(
+                "Enforcing aggregated evidence limit: %d > %d",
+                len(self.aggregated_evidence),
+                max_evidence,
+            )
+            priority_order = {
+                "warning": 0,
+                "wave_hazard_score": 1,
+                "wind_hazard_score": 2,
+                "lightning_hazard_score": 3,
+                "geofence_hazard_score": 4,
+                "pfz_score": 5,
+                "route_cost": 6,
+                "sst": 7,
+                "temperature": 8,
+                "salinity": 9,
+            }
+
+            def sort_key(ev: AgentEvidence) -> tuple[int, str, str]:
+                return (
+                    priority_order.get(ev.variable, 99),
+                    ev.source or "",
+                    ev.variable or "",
+                )
+
+            self.aggregated_evidence.sort(key=sort_key)
+            self.aggregated_evidence = self.aggregated_evidence[:max_evidence]
+
+    def _collect_evidence_from_agent(self, name: str, result: AgentResult) -> None:
+        agent_data = None
+        if hasattr(result, "result") and result.result:
+            agent_data = result.result
+        elif hasattr(result, "evidence"):
+            agent_data = result
+        if not agent_data:
+            return
+        if hasattr(agent_data, "evidence"):
+            for ev in agent_data.evidence:
+                if hasattr(ev, "model_dump"):
+                    ev_dict = ev.model_dump()
+                elif hasattr(ev, "__dict__"):
+                    ev_dict = {k: v for k, v in ev.__dict__.items() if not k.startswith("_")}
+                else:
+                    ev_dict = dict(ev)
+                existing_keys = {
+                    (e.source, e.variable, e.valid_time, e.value)
+                    for e in self.aggregated_evidence
+                }
+                key = (ev_dict.get("source"), ev_dict.get("variable"), ev_dict.get("valid_time"), ev_dict.get("value"))
+                if key not in existing_keys:
+                     self.aggregated_evidence.append(ev)
+

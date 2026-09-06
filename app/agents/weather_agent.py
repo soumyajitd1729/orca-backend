@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, Optional
 
-from app.agents.base_agent import BaseAgent, AgentResult
+from app.agents.base_agent import BaseAgent
 from app.connectors.incois_connector import IncoisConnector
 from app.schemas.agent import AgentEvidence, AgentResultData
 from app.services import observations_service
@@ -67,17 +67,40 @@ class WeatherAgent(BaseAgent):
 
         if not observations:
             connector = IncoisConnector()
-            connector_result = await connector.search_datasets(
-                search_for=" ".join(variables) if variables else "ocean observations"
+            search_result = await connector.search_datasets(
+                search_for=variables[0] if variables else "ocean"
             )
-            if connector_result.status == "success" and connector_result.data:
-                normalized = connector.normalize_observations(connector_result.data)
-                if normalized.evidence:
-                    observations = [
-                        SimpleNamespace(**ev.__dict__) for ev in normalized.evidence
-                    ]
-                    source_status = normalized.source_status
-                    errors.extend(normalized.errors)
+            if search_result.status == "success" and search_result.data:
+                dataset_info = connector.select_observation_dataset(search_result)
+                if dataset_info:
+                    query_variables = []
+                    for var in (variables or ["TEMP", "PSAL"]):
+                        query_variables.append(var.upper() if var.lower() in {"temp", "psal"} else var)
+                    if not query_variables:
+                        query_variables = ["TEMP", "PSAL"]
+
+                    query_method = connector.query_griddap if dataset_info["access_method"] == "griddap" else connector.query_dataset
+                    default_time_min = (datetime.utcnow() - timedelta(days=1095)).strftime("%Y-%m-%d")
+                    query_result = await query_method(
+                        dataset_id=dataset_info["dataset_id"],
+                        variables=query_variables,
+                        lat_min=lat - radius_km / 111.0,
+                        lat_max=lat + radius_km / 111.0,
+                        lon_min=lon - radius_km / 111.0,
+                        lon_max=lon + radius_km / 111.0,
+                        time_min=default_time_min,
+                    )
+                    if query_result.status == "success" and query_result.data:
+                        normalized = connector.normalize_observations(
+                            query_result.data,
+                            variable_mapping={"temp": "temperature", "psal": "salinity"},
+                        )
+                        if normalized.evidence:
+                            observations = [
+                                SimpleNamespace(**ev.__dict__) for ev in normalized.evidence
+                            ]
+                            source_status = normalized.source_status
+                            errors.extend(normalized.errors)
 
         if not observations:
             return AgentResultData(

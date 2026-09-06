@@ -56,6 +56,7 @@ async def chat_orchestration(
         max_wave_height=None,
         db=db,
         normalized_intent=None,
+        request_id=request.state.request_id if hasattr(request, "state") else None,
     )
 
     intent_agent = IntentAgent(name="intent")
@@ -90,6 +91,10 @@ async def chat_orchestration(
     safety_badge = safety_result.get("safety_badge")
     if safety_badge is None:
         safety_badge = synthesis_data.get("safety_badge")
+
+    fishing_suitability = safety_result.get("fishing_suitability")
+    if fishing_suitability is None:
+        fishing_suitability = synthesis_data.get("fishing_suitability")
 
     evidence_cards = []
     for evidence in orchestration_result.aggregated_evidence:
@@ -166,11 +171,13 @@ async def chat_orchestration(
         "conversation_id": payload.conversation_id or f"conv_{orchestration_result.task_id}",
         "answer": answer,
         "safety_badge": safety_badge,
+        "fishing_suitability": fishing_suitability,
         "evidence_cards": evidence_cards,
         "map_layers": map_layers,
         "agent_trace": agent_trace,
         "warnings": warnings_list,
         "follow_up_suggestions": follow_up_suggestions,
+        "request_id": orchestration_result.request_id or getattr(request.state, "request_id", None),
     }
 
     return build_envelope(data=response_data)

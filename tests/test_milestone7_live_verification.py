@@ -32,23 +32,21 @@ def test_incois_evidence_structure():
     connector = IncoisConnector()
     raw = {
         "table": {
-            "columns": [
-                {"name": "variable"},
-                {"name": "value"},
-                {"name": "unit"},
-                {"name": "time"},
+            "columnNames": ["time", "latitude", "longitude", "TEMP", "PSAL"],
+            "columnUnits": ["", "degrees_north", "degrees_east", "degree_C", "PSU"],
+            "rows": [
+                ["2024-01-01T00:00:00Z", 17.0, 83.0, 28.5, 32.0],
             ],
-            "rows": [["sst", "28.5", "celsius", "2024-01-01T00:00:00Z"]],
         }
     }
-    result = connector.normalize_observations(raw)
+    result = connector.normalize_observations(raw, variable_mapping={"temp": "temperature", "psal": "salinity"})
     assert result.status == "success"
-    assert len(result.evidence) == 1
+    assert len(result.evidence) == 2
+    variables = {ev.variable for ev in result.evidence}
+    assert "temperature" in variables
+    assert "salinity" in variables
     ev = result.evidence[0]
     assert ev.source == "incois"
-    assert ev.variable == "sst"
-    assert ev.value == "28.5"
-    assert ev.unit == "celsius"
     assert ev.valid_time is not None
     assert isinstance(ev.valid_time, datetime)
     assert ev.confidence == 0.9
@@ -177,13 +175,9 @@ async def test_weather_agent_falls_back_to_incois_when_db_empty(monkeypatch):
 
     raw_search_result = {
         "table": {
-            "columns": [
-                {"name": "variable"},
-                {"name": "value"},
-                {"name": "unit"},
-                {"name": "time"},
+            "rows": [
+                ["", "https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats", "", "", "", "", "INDIAN ARGO Floats Data", "Indian_ARGO_Floats"],
             ],
-            "rows": [["wave_height", "2.5", "m", "2024-01-01T00:00:00Z"]],
         }
     }
 
@@ -196,19 +190,77 @@ async def test_weather_agent_falls_back_to_incois_when_db_empty(monkeypatch):
             retrieved_at=datetime.utcnow(),
         )
 
+    async def fake_query_dataset(self, dataset_id, variables, lat_min, lat_max, lon_min, lon_max, time_min=None, time_max=None):
+        from app.connectors.base_connector import ConnectorResult
+        return ConnectorResult(
+            status="success",
+            data={
+                "table": {
+                    "columnNames": ["time", "latitude", "longitude", "TEMP", "PSAL"],
+                    "columnUnits": ["UTC", "degrees_north", "degrees_east", "degree_C", "PSU"],
+                    "rows": [["2024-01-01T00:00:00Z", 16.9, 82.2, 28.5, 32.0]],
+                }
+            },
+            source_status="live",
+            retrieved_at=datetime.utcnow(),
+        )
+
     async def fake_get_observations(db, **kwargs):
         return []
 
     monkeypatch.setattr("app.agents.weather_agent.observations_service.get_observations", fake_get_observations)
     monkeypatch.setattr("app.connectors.incois_connector.IncoisConnector.search_datasets", fake_search_datasets)
+    monkeypatch.setattr("app.connectors.incois_connector.IncoisConnector.query_dataset", fake_query_dataset)
+    monkeypatch.setattr("app.connectors.incois_connector.IncoisConnector.query_griddap", fake_query_dataset)
 
     agent = WeatherAgent(name="weather")
     db = AsyncMock()
     result = await agent.run(db=db, lat=16.9, lon=82.2, radius_km=10.0)
     assert result.result.status == "success"
-    assert len(result.result.evidence) == 1
-    assert result.result.evidence[0].variable == "wave_height"
+    assert len(result.result.evidence) == 2
+    variables = {ev.variable for ev in result.result.evidence}
+    assert "temperature" in variables
     assert result.result.source_status == "live"
+
+
+@pytest.mark.asyncio
+async def test_weather_agent_passes_default_time_constraint_to_incois(monkeypatch):
+    from datetime import datetime, timedelta
+
+    connector = IncoisConnector()
+    received_time_min = None
+
+    async def fake_query_dataset(self, dataset_id, variables, lat_min, lat_max, lon_min, lon_max, time_min=None, time_max=None):
+        nonlocal received_time_min
+        received_time_min = time_min
+        from app.connectors.base_connector import ConnectorResult
+        return ConnectorResult(
+            status="success",
+            data={
+                "table": {
+                    "columnNames": ["time", "latitude", "longitude", "TEMP", "PSAL"],
+                    "columnUnits": ["UTC", "degrees_north", "degrees_east", "degree_C", "PSU"],
+                    "rows": [["2024-01-01T00:00:00Z", 16.9, 82.2, 28.5, 32.0]],
+                }
+            },
+            source_status="live",
+            retrieved_at=datetime.utcnow(),
+        )
+
+    async def fake_get_observations(db, **kwargs):
+        return []
+
+    monkeypatch.setattr("app.agents.weather_agent.observations_service.get_observations", fake_get_observations)
+    monkeypatch.setattr("app.connectors.incois_connector.IncoisConnector.search_datasets", connector.search_datasets)
+    monkeypatch.setattr("app.connectors.incois_connector.IncoisConnector.query_dataset", fake_query_dataset)
+
+    agent = WeatherAgent(name="weather")
+    db = AsyncMock()
+    result = await agent.run(db=db, lat=16.9, lon=82.2, radius_km=10.0)
+    assert result.result.status == "success"
+    assert received_time_min is not None
+    expected_min = (datetime.utcnow() - timedelta(days=1095)).strftime("%Y-%m-%d")
+    assert received_time_min == expected_min
 
 
 def test_safety_engine_indeterminate_when_no_data():

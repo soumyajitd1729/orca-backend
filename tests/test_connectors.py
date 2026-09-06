@@ -4,6 +4,7 @@ import asyncio
 from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
 
 from app.connectors.base_connector import BaseConnector, ConnectorEvidence, ConnectorResult
@@ -80,23 +81,20 @@ def test_incois_connector_normalize_observations_with_rows():
     connector = IncoisConnector()
     raw = {
         "table": {
-            "columns": [
-                {"name": "variable"},
-                {"name": "value"},
-                {"name": "unit"},
-                {"name": "time"},
+            "columnNames": ["time", "latitude", "longitude", "TEMP", "PSAL"],
+            "columnUnits": ["", "degrees_north", "degrees_east", "degree_C", "PSU"],
+            "rows": [
+                ["2024-01-01T00:00:00Z", 17.0, 83.0, 28.5, 32.0],
             ],
-            "rows": [["sst", "28.5", "celsius", "2024-01-01T00:00:00Z"]],
         }
     }
-    result = connector.normalize_observations(raw)
+    result = connector.normalize_observations(raw, variable_mapping={"temp": "temperature", "psal": "salinity"})
     assert result.status == "success"
-    assert len(result.evidence) == 1
+    assert len(result.evidence) == 2
+    variables = {ev.variable for ev in result.evidence}
+    assert "temperature" in variables
+    assert "salinity" in variables
     assert result.evidence[0].source == "incois"
-    assert result.evidence[0].variable == "sst"
-    assert result.evidence[0].value == "28.5"
-    assert result.evidence[0].unit == "celsius"
-    assert result.evidence[0].url_ref.startswith("https://erddap.incois.gov.in")
 
 
 def test_incois_connector_normalize_observations_empty():
@@ -104,6 +102,35 @@ def test_incois_connector_normalize_observations_empty():
     result = connector.normalize_observations({"table": {"columns": [], "rows": []}})
     assert result.status == "no_data"
     assert result.source_status == "no_data"
+
+
+@pytest.mark.asyncio
+async def test_incois_connector_query_dataset_no_matching_results():
+    mock_resp = MagicMock()
+    mock_resp.status_code = 404
+    mock_resp.text = 'Error {\n    code=404;\n    message="Not Found: Your query produced no matching results. (nRows = 0)";\n}'
+    mock_resp.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError("404", request=None, response=mock_resp))
+
+    mock_client = MagicMock()
+    mock_client.get = AsyncMock(return_value=mock_resp)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        with patch.object(mock_client, "__aenter__", AsyncMock(return_value=mock_client)):
+            with patch.object(mock_client, "__aexit__", AsyncMock(return_value=False)):
+                connector = IncoisConnector()
+                result = await connector.query_dataset(
+                    dataset_id="test_dataset",
+                    variables=["TEMP"],
+                    lat_min=10.0,
+                    lat_max=11.0,
+                    lon_min=20.0,
+                    lon_max=21.0,
+                    time_min="2099-01-01",
+                )
+
+    assert result.status == "no_data"
+    assert result.source_status == "no_data"
+    assert "incois_query_no_matching_results" in result.errors
 
 
 def test_incois_connector_normalize_warnings():

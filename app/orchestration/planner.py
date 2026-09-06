@@ -70,6 +70,20 @@ def _validate_plan(steps: list[PlanStep]) -> list[str]:
     return issues
 
 
+def _build_complex_marine_plan(intent: NormalizedIntent) -> list[PlanStep]:
+    steps = [
+        PlanStep(agent_name="IntentAgent", depends_on=[], input_mapping={}),
+        PlanStep(agent_name="WeatherAgent", depends_on=["IntentAgent"], input_mapping={}),
+        PlanStep(agent_name="PFZAgent", depends_on=["IntentAgent"], input_mapping={}),
+        PlanStep(agent_name="WarningsAgent", depends_on=["IntentAgent"], input_mapping={}),
+        PlanStep(agent_name="RouteAgent", depends_on=["IntentAgent"], input_mapping={}),
+        PlanStep(agent_name="SafetyEngine", depends_on=["WeatherAgent", "PFZAgent", "WarningsAgent", "RouteAgent"], input_mapping={}),
+        PlanStep(agent_name="EvidenceValidator", depends_on=["SafetyEngine"], input_mapping={}),
+        PlanStep(agent_name="ResponseSynthesizer", depends_on=["EvidenceValidator"], input_mapping={}),
+    ]
+    return steps
+
+
 def _build_fishing_plan(intent: NormalizedIntent) -> list[PlanStep]:
     steps = [
         PlanStep(agent_name="IntentAgent", depends_on=[], input_mapping={}),
@@ -118,7 +132,8 @@ def _build_route_plan(intent: NormalizedIntent) -> list[PlanStep]:
     steps = [
         PlanStep(agent_name="IntentAgent", depends_on=[], input_mapping={}),
         PlanStep(agent_name="RouteAgent", depends_on=["IntentAgent"], input_mapping={}),
-        PlanStep(agent_name="EvidenceValidator", depends_on=["RouteAgent"], input_mapping={}),
+        PlanStep(agent_name="WarningsAgent", depends_on=["IntentAgent"], input_mapping={}),
+        PlanStep(agent_name="EvidenceValidator", depends_on=["RouteAgent", "WarningsAgent"], input_mapping={}),
     ]
     if _is_safety_query(intent):
         steps.append(
@@ -132,6 +147,16 @@ def _build_route_plan(intent: NormalizedIntent) -> list[PlanStep]:
             PlanStep(agent_name="ResponseSynthesizer", depends_on=["EvidenceValidator"], input_mapping={})
         )
     return steps
+
+
+def _is_complex_marine_query(intent: NormalizedIntent) -> bool:
+    active_intents = sum([
+        intent.weather_intent,
+        intent.pfz_intent,
+        intent.warning_intent,
+        intent.route_intent,
+    ])
+    return active_intents >= 2
 
 
 def _build_general_plan(intent: NormalizedIntent) -> list[PlanStep]:
@@ -153,6 +178,8 @@ def create_plan(intent: NormalizedIntent) -> ExecutionPlan:
         steps = _build_pfz_plan(intent)
     elif intent.query_type == "route":
         steps = _build_route_plan(intent)
+    elif _is_complex_marine_query(intent):
+        steps = _build_complex_marine_plan(intent)
     else:
         steps = _build_general_plan(intent)
 

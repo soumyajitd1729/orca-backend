@@ -80,6 +80,7 @@ class OrchestrationContext(BaseModel):
     max_wave_height: Optional[float] = None
     db: Any = None
     normalized_intent: Optional[NormalizedIntent] = None
+    request_id: Optional[str] = None
 
 
 class AgentTraceEntry(BaseModel):
@@ -105,3 +106,4 @@ class OrchestrationResult(BaseModel):
     synthesis_result: Optional[dict] = None
     errors: list[str] = Field(default_factory=list)
     overall_status: str = "success"
+    request_id: Optional[str] = None

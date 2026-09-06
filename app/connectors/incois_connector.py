@@ -53,6 +53,7 @@ INCOIS_CA_BUNDLE = Path(__file__).resolve().parent.parent.parent / "orca_ca_bund
 WHY_IT_MATTERS = {
     "sst": "Sea surface temperature affects fish distribution and storm intensity.",
     "sea_surface_temperature": "Sea surface temperature affects fish distribution and storm intensity.",
+    "temperature": "Water temperature affects marine ecosystem behavior and vessel cooling systems.",
     "chlorophyll": "Chlorophyll indicates phytoplankton concentration and potential fishing zones.",
     "wave_height": "Wave height directly impacts vessel safety and fishing operations.",
     "significant_wave_height": "Significant wave height is a critical safety metric for marine operations.",
@@ -60,6 +61,8 @@ WHY_IT_MATTERS = {
     "wind_direction": "Wind direction influences wave patterns and drift.",
     "air_temperature": "Air temperature affects crew comfort and equipment performance.",
     "humidity": "Humidity affects weather patterns and storm development.",
+    "salinity": "Salinity affects water density and marine ecosystem behavior.",
+    "psal": "Salinity affects water density and marine ecosystem behavior.",
     "swell_height": "Swell height contributes to overall sea state and vessel safety.",
     "swell_period": "Swell period indicates ocean swell characteristics affecting vessel motion.",
     "wave_direction": "Wave direction influences vessel routing and sea state exposure.",
@@ -119,7 +122,11 @@ class IncoisConnector(BaseConnector):
         try:
             import httpx
 
-            var_csv = ",".join(variables)
+            normalized_vars = [v for v in variables if v and v.strip()]
+            for coord in {"latitude", "longitude", "time"}:
+                if coord not in [v.lower() for v in normalized_vars]:
+                    normalized_vars.append(coord)
+            var_csv = ",".join(normalized_vars)
             constraints = [
                 f"latitude>={lat_min}",
                 f"latitude<={lat_max}",
@@ -139,6 +146,14 @@ class IncoisConnector(BaseConnector):
 
             async with httpx.AsyncClient(timeout=self.timeout, verify=self._ca_bundle) as client:
                 response = await client.get(url)
+                if response.status_code == 404 and "no matching results" in response.text:
+                    return ConnectorResult(
+                        status="no_data",
+                        data=None,
+                        errors=["incois_query_no_matching_results"],
+                        source_status="no_data",
+                        retrieved_at=datetime.utcnow(),
+                    )
                 response.raise_for_status()
                 payload = response.json()
                 return ConnectorResult(
@@ -155,6 +170,118 @@ class IncoisConnector(BaseConnector):
                 source_status="unavailable",
                 retrieved_at=datetime.utcnow(),
             )
+
+    async def query_griddap(
+        self,
+        dataset_id: str,
+        variables: list[str],
+        lat_min: float,
+        lat_max: float,
+        lon_min: float,
+        lon_max: float,
+        time_min: Optional[str] = None,
+        time_max: Optional[str] = None,
+    ) -> ConnectorResult:
+        try:
+            import httpx
+
+            var_csv = ",".join(variables)
+            constraints = [
+                f"latitude>={lat_min}",
+                f"latitude<={lat_max}",
+                f"longitude>={lon_min}",
+                f"longitude<={lon_max}",
+            ]
+            if time_min:
+                constraints.append(f"time>={time_min}")
+            if time_max:
+                constraints.append(f"time<={time_max}")
+
+            constraint_str = "&".join(constraints)
+            url = (
+                f"{self.base_url}/griddap/{dataset_id}.json"
+                f"?{var_csv}&{constraint_str}"
+            )
+
+            async with httpx.AsyncClient(timeout=self.timeout, verify=self._ca_bundle) as client:
+                response = await client.get(url)
+                if response.status_code == 404 and "no matching results" in response.text:
+                    return ConnectorResult(
+                        status="no_data",
+                        data=None,
+                        errors=["incois_griddap_no_matching_results"],
+                        source_status="no_data",
+                        retrieved_at=datetime.utcnow(),
+                    )
+                response.raise_for_status()
+                payload = response.json()
+                return ConnectorResult(
+                    status="success",
+                    data=payload,
+                    source_status="live",
+                    retrieved_at=datetime.utcnow(),
+                )
+        except Exception as exc:
+            logger.warning("INCOIS griddap query failed: %s", exc)
+            return ConnectorResult(
+                status="error",
+                errors=[f"incois_griddap_failed: {exc}"],
+                source_status="unavailable",
+                retrieved_at=datetime.utcnow(),
+            )
+
+    def select_observation_dataset(self, search_result: ConnectorResult) -> dict | None:
+        if search_result.status != "success" or not isinstance(search_result.data, dict):
+            return None
+
+        table = search_result.data.get("table", {})
+        rows = table.get("rows", [])
+        if not rows:
+            return None
+
+        tabledap_row = None
+        griddap_row = None
+
+        for row in rows:
+            if not isinstance(row, list) or len(row) < 2:
+                continue
+            dataset_id = str(row[-1]) if row[-1] else ""
+            if not dataset_id:
+                continue
+            if dataset_id.lower() in {"alldatasets", "allDatasets"}:
+                continue
+
+            row_url = next((str(cell) for cell in row if isinstance(cell, str) and ("/tabledap/" in cell or "/griddap/" in cell)), "")
+            if not row_url:
+                continue
+
+            if "/tabledap/" in row_url and tabledap_row is None:
+                tabledap_row = row
+            elif "/griddap/" in row_url and griddap_row is None:
+                griddap_row = row
+
+        dataset_row = tabledap_row or griddap_row or rows[0]
+        if not dataset_row:
+            return None
+
+        row_url = next((str(cell) for cell in dataset_row if isinstance(cell, str) and ("/tabledap/" in cell or "/griddap/" in cell)), "")
+        dataset_id = str(dataset_row[-1]) if dataset_row[-1] else ""
+
+        if not dataset_id or not row_url:
+            return None
+
+        if "/tabledap/" in row_url:
+            access_method = "tabledap"
+        elif "/griddap/" in row_url:
+            access_method = "griddap"
+        else:
+            access_method = "tabledap"
+
+        return {
+            "dataset_id": dataset_id,
+            "url": row_url,
+            "access_method": access_method,
+        }
 
     def normalize_observations(
         self,
@@ -173,58 +300,81 @@ class IncoisConnector(BaseConnector):
                 retrieved_at=datetime.utcnow(),
             )
 
-        rows = []
+        rows: list[dict] = []
+        column_names: list[str] = []
+        column_units: dict[str, str] = {}
+
         if isinstance(raw, dict):
-            if "table" in raw and "rows" in raw["table"]:
-                columns = [c["name"] for c in raw["table"].get("columns", [])]
-                rows = [dict(zip(columns, row)) for row in raw["table"]["rows"]]
+            if "table" in raw:
+                table = raw["table"]
+                if "columnNames" in table:
+                    column_names = [str(c) for c in table["columnNames"]]
+                elif "columns" in table:
+                    column_names = [c.get("name", "") for c in table["columns"]]
+                if "columnUnits" in table and isinstance(table["columnUnits"], list):
+                    for idx, unit in enumerate(table["columnUnits"]):
+                        if idx < len(column_names):
+                            column_units[column_names[idx]] = str(unit) if unit else ""
+                if "rows" in table:
+                    rows = [dict(zip(column_names, row)) for row in table["rows"]]
             elif "data" in raw and "variables" in raw:
                 variables = raw["variables"]
                 data_rows = raw["data"]
                 rows = [dict(zip(variables, row)) for row in data_rows]
+                column_names = [str(v) for v in variables]
             else:
                 errors.append(f"unexpected_erddap_payload_keys={list(raw.keys())[:5]}")
         elif isinstance(raw, list):
-            rows = raw
+            rows = [dict(r) if isinstance(r, dict) else {} for r in raw]
         else:
             errors.append(f"unsupported_raw_type={type(raw).__name__}")
 
         if not rows and not errors:
             errors.append("no_rows_returned")
 
+        SPATIAL_COLUMNS = {"latitude", "longitude", "lat", "lon", "LATITUDE", "LONGITUDE"}
+        TIME_COLUMNS = {"time", "TIME", "date", "DATE"}
+
         for row in rows:
             if not isinstance(row, dict):
                 continue
-            raw_var = row.get("variable") or row.get("Variable") or ""
-            variable = variable_mapping.get(raw_var.lower(), raw_var.lower())
-            value = row.get("value") or row.get("Value") or row.get("magnitude")
-            unit = row.get("unit") or row.get("Unit") or ""
-            time_str = row.get("time") or row.get("Time") or row.get("date") or row.get("Date")
-            confidence = row.get("confidence") or row.get("qc") or 0.9
 
-            if value is None:
-                errors.append(f"missing_value_for_variable={variable}")
-                continue
+            time_str = None
+            for key in TIME_COLUMNS:
+                if key in row and row[key] is not None:
+                    time_str = str(row[key])
+                    break
 
             valid_time = None
             if time_str:
                 try:
-                    valid_time = datetime.fromisoformat(str(time_str).replace("Z", "+00:00"))
+                    valid_time = datetime.fromisoformat(time_str.replace("Z", "+00:00"))
                 except Exception:
                     valid_time = datetime.utcnow()
 
-            evidence.append(
-                ConnectorEvidence(
-                    source="incois",
-                    variable=variable,
-                    value=value,
-                    unit=unit or None,
-                    valid_time=valid_time,
-                    confidence=confidence if isinstance(confidence, (int, float)) else 0.9,
-                    why_it_matters=WHY_IT_MATTERS.get(variable),
-                    url_ref=f"{INCOIS_ERDDAP_BASE}/tabledap/{row.get('datasetId', 'unknown')}.html",
+            for col in column_names:
+                if col in SPATIAL_COLUMNS or col in TIME_COLUMNS:
+                    continue
+                raw_value = row.get(col)
+                if raw_value is None:
+                    continue
+
+                variable = variable_mapping.get(col.lower(), col.lower())
+                unit = column_units.get(col, "")
+                confidence = 0.9
+
+                evidence.append(
+                    ConnectorEvidence(
+                        source="incois",
+                        variable=variable,
+                        value=raw_value,
+                        unit=unit or None,
+                        valid_time=valid_time,
+                        confidence=confidence,
+                        why_it_matters=WHY_IT_MATTERS.get(variable),
+                        url_ref=f"{INCOIS_ERDDAP_BASE}/tabledap/unknown.html",
+                    )
                 )
-            )
 
         status = "success" if evidence else "no_data"
         source_status = "live" if evidence else "no_data"

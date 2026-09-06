@@ -26,6 +26,18 @@ class GroqClient:
             )
         return self._client
 
+    def _categorize_failure(self, exc: Exception) -> str:
+        error_str = str(exc).lower()
+        if "rate limit" in error_str or "429" in error_str or "tokens per day" in error_str:
+            return "rate_limited"
+        if "timeout" in error_str:
+            return "timeout"
+        if "api key" in error_str or "401" in error_str or "403" in error_str:
+            return "authentication_error"
+        if "model not found" in error_str or "404" in error_str:
+            return "model_unavailable"
+        return "upstream_error"
+
     async def chat(
         self,
         messages: list[ChatCompletionMessageParam],
@@ -50,8 +62,14 @@ class GroqClient:
                 **kwargs,
             )
         except Exception as exc:
-            logger.error("Groq chat request failed", exc_info=True)
-            raise RuntimeError(f"Groq request failed: {exc}") from exc
+            category = self._categorize_failure(exc)
+            logger.error(
+                "Groq chat request failed: category=%s, error=%s",
+                category,
+                exc,
+                exc_info=True,
+            )
+            raise RuntimeError(f"Groq request failed [{category}]: {exc}") from exc
 
         return response
 
