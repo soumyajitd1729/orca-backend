@@ -1,148 +1,183 @@
 from fastapi import APIRouter, Depends, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import List, Optional, Any
 from sqlalchemy.ext.asyncio import AsyncSession
 import logging
 
+from app.agents.intent_agent import IntentAgent
 from app.db.session import get_db
 from app.envelope import build_envelope
-from app.services import warnings_service, pfz_service
+from app.orchestration.orchestrator import Orchestrator
+from app.schemas.agent import (
+    AgentEvidence,
+    AgentTraceEntry,
+    NormalizedIntent,
+    OrchestrationContext,
+)
 
 logger = logging.getLogger("orca")
 router = APIRouter()
 
+
+class UserLocation(BaseModel):
+    lat: float
+    lon: float
+
+
 class ChatRequest(BaseModel):
     message: str
     conversation_id: Optional[str] = None
+    language: str = Field(default="en", pattern="^(en|hi|te)$")
+    user_location: Optional[UserLocation] = None
+
 
 class EvidenceCard(BaseModel):
     source: str
     url: Optional[str] = None
     snippet: str
 
-# Note: We return a dict conforming to the backend spec envelope structure, 
-# so we drop response_model=ChatResponse or update it to match the envelope wrapper {'data': {...}, 'meta': {...}, 'errors': [...]}
+
 @router.post("/chat")
-async def chat_orchestration(payload: ChatRequest, request: Request, db: AsyncSession = Depends(get_db)) -> dict:
-    msg_lower = payload.message.lower()
-    agent_trace = []
+async def chat_orchestration(
+    payload: ChatRequest,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    context = OrchestrationContext(
+        conversation_id=payload.conversation_id,
+        user_message=payload.message,
+        language=payload.language,
+        user_location=None,
+        user_lat=payload.user_location.lat if payload.user_location else None,
+        user_lon=payload.user_location.lon if payload.user_location else None,
+        requested_radius_km=25.0,
+        route_waypoints=None,
+        vessel_type=None,
+        max_wave_height=None,
+        db=db,
+        normalized_intent=None,
+        request_id=request.state.request_id if hasattr(request, "state") else None,
+    )
+
+    intent_agent = IntentAgent(name="intent")
+    intent_result = await intent_agent.run(
+        message=payload.message,
+        user_location=context.user_location,
+        user_lat=context.user_lat,
+        user_lon=context.user_lon,
+        requested_radius_km=context.requested_radius_km,
+    )
+    intent_data = intent_result.result.data if intent_result.result and hasattr(intent_result.result, "data") else {}
+    if not isinstance(intent_data, dict):
+        intent_data = {}
+
+    intent = NormalizedIntent(
+        query_type=intent_data.get("query_type", "general"),
+        location_name=context.user_location,
+        latitude=context.user_lat,
+        longitude=context.user_lon,
+        language=payload.language,
+        requested_radius_km=context.requested_radius_km,
+        raw_message=payload.message,
+    )
+
+    orchestrator = Orchestrator(db=db, context=context)
+    orchestration_result = await orchestrator.execute(intent)
+
+    safety_result = orchestration_result.safety_result or {}
+    synthesis = orchestration_result.synthesis_result or {}
+    synthesis_data = synthesis.get("data", synthesis) if isinstance(synthesis, dict) else {}
+
+    safety_badge = safety_result.get("safety_badge")
+    if safety_badge is None:
+        safety_badge = synthesis_data.get("safety_badge")
+
+    fishing_suitability = safety_result.get("fishing_suitability")
+    if fishing_suitability is None:
+        fishing_suitability = synthesis_data.get("fishing_suitability")
+
     evidence_cards = []
+    for evidence in orchestration_result.aggregated_evidence:
+        evidence_cards.append(
+            {
+                "source": evidence.source,
+                "url": evidence.url_ref,
+                "snippet": f"{evidence.variable}: {evidence.value} {evidence.unit or ''}".strip(),
+            }
+        )
+
     warnings_list = []
+    for r in orchestration_result.agent_results:
+        agent_name = r.get("agent_name") if isinstance(r, dict) else getattr(r, "agent_name", None)
+        if agent_name == "WarningsAgent":
+            raw_warnings = r.get("data") if isinstance(r, dict) else getattr(r, "data", None)
+            if isinstance(raw_warnings, list):
+                warnings_list = [w for w in raw_warnings if isinstance(w, dict)]
+            break
+
+    def _to_iso(val):
+        if val is None:
+            return None
+        if isinstance(val, str):
+            return val
+        if hasattr(val, "isoformat"):
+            return val.isoformat()
+        return str(val)
+
+    agent_trace = []
+    for trace in orchestration_result.agent_trace:
+        agent_trace.append(
+            {
+                "agent_name": trace.get("agent_name") if isinstance(trace, dict) else getattr(trace, "agent_name", None),
+                "status": trace.get("status") if isinstance(trace, dict) else getattr(trace, "status", None),
+                "task_id": trace.get("task_id") if isinstance(trace, dict) else getattr(trace, "task_id", None),
+                "started_at": _to_iso(trace.get("started_at") if isinstance(trace, dict) else getattr(trace, "started_at", None)),
+                "completed_at": _to_iso(trace.get("completed_at") if isinstance(trace, dict) else getattr(trace, "completed_at", None)),
+                "duration_ms": trace.get("duration_ms") if isinstance(trace, dict) else getattr(trace, "duration_ms", None),
+                "dependencies": trace.get("dependencies") if isinstance(trace, dict) else getattr(trace, "dependencies", []),
+                "error": trace.get("error") if isinstance(trace, dict) else getattr(trace, "error", None),
+            }
+        )
+
     map_layers = []
-    
-    # 1. Intent Parsing & Slot Extraction
-    agent_trace.append("Intent parsed successfully")
-    
-    # Branch A: Marine Warnings Query
-    if "warning" in msg_lower or "warnings" in msg_lower or "imd" in msg_lower:
-        agent_trace.append("Slot extraction: query_type=marine_warnings")
-        agent_trace.append("Task DAG: Warnings Service Retrieval -> Deterministic Verification")
-        
-        try:
-            warnings_data = await warnings_service.get_active_warnings(db)
-            if isinstance(warnings_data, dict):
-                warnings_list = warnings_data.get("data", [])
-            else:
-                warnings_list = [w.model_dump() if hasattr(w, "model_dump") else dict(w) for w in warnings_data]
-        except Exception as e:
-            logger.warning(f"Could not fetch warnings from DB: {e}")
-            warnings_list = []
-            
-        if warnings_list:
-            safety_badge = "CAUTION"
-            answer = f"Found {len(warnings_list)} active marine warning(s) currently recorded in the system."
-            evidence_cards.append({
-                "source": "IMD / Warnings Service",
-                "url": None,
-                "snippet": f"Active warnings retrieved: {len(warnings_list)} active alerts found."
-            })
-        else:
-            safety_badge = "SAFE"
-            answer = "No active critical marine warnings found in the system at this time."
-            evidence_cards.append({
-                "source": "IMD / Warnings Service",
-                "url": None,
-                "snippet": "Checked active warnings database. No current alerts."
-            })
-            
-        follow_ups = [
-            "What are the nearest PFZ zones?",
-            "Is it safe to fish near Kakinada tomorrow morning?"
-        ]
-        
-    # Branch B: Location / Fishing / Kakinada Safety Query
-    elif "safe" in msg_lower or "fish" in msg_lower or "kakinada" in msg_lower or "tomorrow" in msg_lower:
-        agent_trace.append("Slot extraction: location=Kakinada, time=tomorrow morning, activity=fishing")
-        agent_trace.append("Task DAG: Weather/Ocean Analytics -> Geospatial -> Deterministic Risk Engine")
-        
-        lat, lon, radius_km = 16.9891, 82.2475, 25.0
-        
-        try:
-            pfz_zones = await pfz_service.get_pfz_zones(lat, lon, radius_km, db)
-            pfz_count = len(pfz_zones) if pfz_zones else 0
-        except Exception as e:
-            logger.warning(f"Could not fetch PFZ zones: {e}")
-            pfz_zones = []
-            pfz_count = 0
-            
-        map_layers.append({
-            "layer_type": "pfz_zones",
-            "center": [lat, lon],
-            "radius_km": radius_km,
-            "features_count": pfz_count
-        })
-        
-        if pfz_count > 0:
-            safety_badge = "SAFE"
-            answer = f"Fishing near Kakinada tomorrow morning appears favorable. Found {pfz_count} verified Potential Fishing Zone(s) nearby with stable oceanographic indicators."
-            evidence_cards.append({
-                "source": "INCOIS PFZ Service",
-                "url": None,
-                "snippet": f"Detected {pfz_count} active PFZ clusters within {radius_km}km of Kakinada."
-            })
-        else:
-            safety_badge = "CAUTION"
-            answer = "Conditions near Kakinada show limited or unavailable PFZ indicator data for tomorrow morning. Exercise caution and check local updates."
-            evidence_cards.append({
-                "source": "INCOIS PFZ Service",
-                "url": None,
-                "snippet": "No high-confidence PFZ clusters returned for specified radius; data unavailable to confirm full safety."
-            })
-            
-        follow_ups = [
-            "What are the current marine warnings?",
-            "Show wave height and wind forecasts for Kakinada."
-        ]
-        
-    # Branch C: Fallback General Query
-    else:
-        agent_trace.append("Slot extraction: general query")
-        agent_trace.append("Task DAG: General State Synthesis")
-        safety_badge = "SAFE"
-        answer = "ORCA marine intelligence system active. How can I assist you with ocean analytics, PFZ data, or safety warnings?"
-        evidence_cards.append({
-            "source": "ORCA Core System",
-            "url": None,
-            "snippet": "System operational and ready."
-        })
-        follow_ups = [
-            "Is it safe to fish near Kakinada tomorrow morning?",
-            "What are the current marine warnings?"
-        ]
-        
-    agent_trace.append("Evidence validation & report synthesis complete")
-    
-    # Construct response matching backend spec structure
+    for evidence in orchestration_result.aggregated_evidence:
+        if evidence.source == "orca_route_service" and evidence.variable == "route_cost":
+            map_layers.append(
+                {
+                    "layer_type": "route",
+                    "route_cost": evidence.value,
+                    "unit": evidence.unit,
+                }
+            )
+        elif evidence.source == "incois" and evidence.variable == "pfz_score":
+            map_layers.append(
+                {
+                    "layer_type": "pfz_zones",
+                    "score": evidence.value,
+                    "unit": evidence.unit,
+                    "valid_time": evidence.valid_time.isoformat() if evidence.valid_time else None,
+                }
+            )
+
+    answer = synthesis_data.get("answer", "")
+    if not answer and orchestration_result.overall_status in ("timeout", "error"):
+        answer = "The orchestration pipeline encountered an issue. Current safety cannot be confirmed due to insufficient or unavailable data."
+    elif not answer:
+        answer = "Current safety cannot be confirmed because required marine data is unavailable."
+
+    follow_up_suggestions = synthesis_data.get("follow_up_suggestions", [])
+
     response_data = {
-        "conversation_id": payload.conversation_id or "conv_999",
+        "conversation_id": payload.conversation_id or f"conv_{orchestration_result.task_id}",
         "answer": answer,
         "safety_badge": safety_badge,
+        "fishing_suitability": fishing_suitability,
         "evidence_cards": evidence_cards,
         "map_layers": map_layers,
         "agent_trace": agent_trace,
         "warnings": warnings_list,
-        "follow_up_suggestions": follow_ups
+        "follow_up_suggestions": follow_up_suggestions,
+        "request_id": orchestration_result.request_id or getattr(request.state, "request_id", None),
     }
-    
-    # Wrap with envelope structure requested by the team
+
     return build_envelope(data=response_data)

@@ -39,6 +39,20 @@ async def get_warnings(lat: float, lon: float, radius_km: float, db) -> list[War
     return [_to_warning_out(row, geojson_str) for row, geojson_str in rows]
 
 
+async def get_active_warnings(db) -> list[WarningOut]:
+    rows = await warnings_repository.get_all_active_warnings(db)
+    return [_to_warning_out(row, None) for row in rows]
+
+
+async def get_active_warnings_within_radius(
+    lat: float, lon: float, radius_km: float, db
+) -> list[WarningOut]:
+    rows = await warnings_repository.get_active_warnings_within_radius(
+        db, lat, lon, radius_km
+    )
+    return [_to_warning_out(row, geojson_str) for row, geojson_str in rows]
+
+
 async def get_all_warnings(db) -> list[WarningOut]:
     rows = await warnings_repository.get_all_active_warnings(db)
     return [_to_warning_out(row, None) for row in rows]

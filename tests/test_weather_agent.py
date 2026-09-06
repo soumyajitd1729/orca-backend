@@ -1,0 +1,110 @@
+from unittest.mock import AsyncMock, patch
+
+import pytest
+
+from app.agents.weather_agent import WeatherAgent
+from app.schemas.agent import AgentResultData
+
+
+class FakeObservation:
+    def __init__(self, variable, value, unit, confidence=0.9, observed_at=None, source_time=None):
+        self.id = "obs-1"
+        self.variable = variable
+        self.value = value
+        self.unit = unit
+        self.geometry = None
+        self.observed_at = observed_at
+        self.source_time = source_time if source_time else observed_at
+        self.source_id = None
+        self.quality_flag = "good"
+        self.confidence = confidence
+
+    def model_dump(self):
+        return {
+            "id": self.id,
+            "variable": self.variable,
+            "value": self.value,
+            "unit": self.unit,
+            "geometry": self.geometry,
+            "observed_at": self.observed_at.isoformat() if self.observed_at else None,
+            "source_time": self.source_time.isoformat() if self.source_time else None,
+            "source_id": self.source_id,
+            "quality_flag": self.quality_flag,
+            "confidence": self.confidence,
+        }
+
+
+@pytest.mark.asyncio
+async def test_weather_agent_success(monkeypatch):
+    fake_obs = [
+        FakeObservation("sst", 28.5, "celsius"),
+        FakeObservation("wind_speed", 15.0, "kt"),
+    ]
+
+    async def fake_get_observations(db, **kwargs):
+        return fake_obs
+
+    monkeypatch.setattr("app.agents.weather_agent.observations_service.get_observations", fake_get_observations)
+
+    agent = WeatherAgent(name="weather")
+    db = AsyncMock()
+    result = await agent.run(db=db, lat=16.9, lon=82.2, radius_km=10.0)
+    assert isinstance(result.result, AgentResultData)
+    assert result.result.status == "success"
+    assert len(result.result.data) == 2
+    assert len(result.result.evidence) == 2
+    assert result.result.source_status == "live"
+    assert result.result.duration_ms is not None and result.result.duration_ms >= 0
+
+
+@pytest.mark.asyncio
+async def test_weather_agent_no_data(monkeypatch):
+    async def fake_get_observations(db, **kwargs):
+        return []
+
+    monkeypatch.setattr("app.agents.weather_agent.observations_service.get_observations", fake_get_observations)
+
+    agent = WeatherAgent(name="weather")
+    db = AsyncMock()
+    result = await agent.run(db=db, lat=16.9, lon=82.2, radius_km=10.0)
+    assert result.result.status == "no_data"
+    assert result.result.data == []
+    assert result.result.evidence == []
+
+
+@pytest.mark.asyncio
+async def test_weather_agent_unavailable(monkeypatch):
+    async def fake_get_observations(db, **kwargs):
+        raise RuntimeError("DB down")
+
+    monkeypatch.setattr("app.agents.weather_agent.observations_service.get_observations", fake_get_observations)
+
+    agent = WeatherAgent(name="weather")
+    db = AsyncMock()
+    result = await agent.run(db=db, lat=16.9, lon=82.2, radius_km=10.0)
+    assert result.result.status == "unavailable"
+    assert result.result.data is None
+    assert len(result.result.errors) > 0
+
+
+@pytest.mark.asyncio
+async def test_weather_agent_evidence_generation(monkeypatch):
+    fake_obs = [
+        FakeObservation("wave_height", 2.5, "m", confidence=0.85),
+    ]
+
+    async def fake_get_observations(db, **kwargs):
+        return fake_obs
+
+    monkeypatch.setattr("app.agents.weather_agent.observations_service.get_observations", fake_get_observations)
+
+    agent = WeatherAgent(name="weather")
+    db = AsyncMock()
+    result = await agent.run(db=db, lat=16.9, lon=82.2, radius_km=10.0)
+    assert len(result.result.evidence) == 1
+    assert result.result.evidence[0].source == "incois"
+    assert result.result.evidence[0].variable == "wave_height"
+    assert result.result.evidence[0].value == 2.5
+    assert result.result.evidence[0].unit == "m"
+    assert result.result.evidence[0].confidence == 0.85
+    assert "why_it_matters" in result.result.evidence[0].model_dump()
