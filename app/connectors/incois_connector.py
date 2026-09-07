@@ -123,6 +123,9 @@ class IncoisConnector(BaseConnector):
             import httpx
 
             dataset_id = self._normalize_dataset_id(dataset_id)
+            if "://" in dataset_id:
+                logger.warning("dataset_id still contains URL scheme after normalization: %s", dataset_id)
+                dataset_id = dataset_id.rstrip("/").split("/")[-1].replace(".html", "").replace(".json", "")
             normalized_vars = [v for v in variables if v and v.strip()]
             for coord in {"latitude", "longitude", "time"}:
                 if coord not in [v.lower() for v in normalized_vars]:
@@ -187,6 +190,9 @@ class IncoisConnector(BaseConnector):
             import httpx
 
             dataset_id = self._normalize_dataset_id(dataset_id)
+            if "://" in dataset_id:
+                logger.warning("dataset_id still contains URL scheme after normalization: %s", dataset_id)
+                dataset_id = dataset_id.rstrip("/").split("/")[-1].replace(".html", "").replace(".json", "")
             var_csv = ",".join(variables)
             constraints = [
                 f"latitude>={lat_min}",
