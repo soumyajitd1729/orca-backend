@@ -122,6 +122,7 @@ class IncoisConnector(BaseConnector):
         try:
             import httpx
 
+            dataset_id = self._normalize_dataset_id(dataset_id)
             normalized_vars = [v for v in variables if v and v.strip()]
             for coord in {"latitude", "longitude", "time"}:
                 if coord not in [v.lower() for v in normalized_vars]:
@@ -185,6 +186,7 @@ class IncoisConnector(BaseConnector):
         try:
             import httpx
 
+            dataset_id = self._normalize_dataset_id(dataset_id)
             var_csv = ",".join(variables)
             constraints = [
                 f"latitude>={lat_min}",
@@ -242,6 +244,7 @@ class IncoisConnector(BaseConnector):
                 if not isinstance(item, dict):
                     continue
                 dataset_id = str(item.get("datasetID") or item.get("dataset_id") or "").strip()
+                dataset_id = self._normalize_dataset_id(dataset_id)
                 if not dataset_id or dataset_id.lower() in {"alldatasets", "alldatasets"}:
                     continue
                 url = str(item.get("url") or item.get("publicUrl") or item.get("accessUrl") or "")
@@ -284,6 +287,7 @@ class IncoisConnector(BaseConnector):
                     row_url = cell_str
                 if isinstance(cell, str) and cell.strip() and not dataset_id:
                     dataset_id = cell.strip()
+            dataset_id = self._normalize_dataset_id(dataset_id)
             if not dataset_id:
                 continue
             if dataset_id.lower() in {"alldatasets", "allDatasets"}:
@@ -309,6 +313,7 @@ class IncoisConnector(BaseConnector):
                 row_url = cell_str
             if isinstance(cell, str) and cell.strip() and not dataset_id:
                 dataset_id = cell.strip()
+        dataset_id = self._normalize_dataset_id(dataset_id)
 
         if not dataset_id or not row_url:
             return None
@@ -325,6 +330,15 @@ class IncoisConnector(BaseConnector):
             "url": row_url,
             "access_method": access_method,
         }
+
+    @staticmethod
+    def _normalize_dataset_id(raw_id: str) -> str:
+        raw_id = (raw_id or "").strip()
+        if not raw_id:
+            return ""
+        if "/" in raw_id:
+            raw_id = raw_id.rstrip("/").split("/")[-1]
+        return raw_id.replace(".html", "").replace(".json", "")
 
     def normalize_observations(
         self,

@@ -401,3 +401,98 @@ async def test_incois_weather_agent_integration_with_list_search_response():
                         result = await agent._execute(db=None, lat=17.0, lon=82.0, radius_km=10.0, variables=["TEMP", "PSAL"])
 
     assert result.status == "no_data"
+
+
+def test_incois_select_observation_dataset_normalizes_full_url_dataset_id():
+    connector = IncoisConnector()
+    search_result = ConnectorResult(
+        status="success",
+        data=[
+            {
+                "datasetID": "https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats.subset",
+                "url": "https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats.subset.html",
+            },
+        ],
+        source_status="live",
+    )
+    result = connector.select_observation_dataset(search_result)
+    assert result is not None
+    assert result["dataset_id"] == "Indian_ARGO_Floats.subset"
+    assert result["access_method"] == "tabledap"
+
+
+def test_incois_select_observation_dataset_normalizes_path_style_dataset_id():
+    connector = IncoisConnector()
+    search_result = ConnectorResult(
+        status="success",
+        data=[
+            {
+                "datasetID": "/erddap/tabledap/Indian_ARGO_Floats.subset.html",
+                "url": "https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats.subset.html",
+            },
+        ],
+        source_status="live",
+    )
+    result = connector.select_observation_dataset(search_result)
+    assert result is not None
+    assert result["dataset_id"] == "Indian_ARGO_Floats.subset"
+
+
+@pytest.mark.asyncio
+async def test_incois_query_dataset_does_not_double_concatenate_base_url():
+    connector = IncoisConnector()
+    connector.base_url = "https://erddap.incois.gov.in/erddap"
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json = MagicMock(return_value={"table": {"rows": [], "columnNames": [], "columnUnits": []}})
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        await connector.query_dataset(
+            dataset_id="https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats.subset",
+            variables=["TEMP"],
+            lat_min=10.0,
+            lat_max=11.0,
+            lon_min=20.0,
+            lon_max=21.0,
+        )
+
+    called_url = mock_client.get.call_args[0][0]
+    assert called_url.startswith("https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats.subset.json")
+    assert called_url.count("https://erddap.incois.gov.in/erddap") == 1
+
+
+@pytest.mark.asyncio
+async def test_incois_query_griddap_does_not_double_concatenate_base_url():
+    connector = IncoisConnector()
+    connector.base_url = "https://erddap.incois.gov.in/erddap"
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json = MagicMock(return_value={"table": {"rows": [], "columnNames": [], "columnUnits": []}})
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        await connector.query_griddap(
+            dataset_id="https://erddap.incois.gov.in/erddap/griddap/Indian_ARGO_Floats.subset",
+            variables=["TEMP"],
+            lat_min=10.0,
+            lat_max=11.0,
+            lon_min=20.0,
+            lon_max=21.0,
+        )
+
+    called_url = mock_client.get.call_args[0][0]
+    assert called_url.startswith("https://erddap.incois.gov.in/erddap/griddap/Indian_ARGO_Floats.subset.json")
+    assert called_url.count("https://erddap.incois.gov.in/erddap") == 1
