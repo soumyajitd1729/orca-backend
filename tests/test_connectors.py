@@ -496,3 +496,32 @@ async def test_incois_query_griddap_does_not_double_concatenate_base_url():
     called_url = mock_client.get.call_args[0][0]
     assert called_url.startswith("https://erddap.incois.gov.in/erddap/griddap/Indian_ARGO_Floats.subset.json")
     assert called_url.count("https://erddap.incois.gov.in/erddap") == 1
+
+
+def test_incois_end_to_end_production_url_bug():
+    connector = IncoisConnector()
+    connector.base_url = "https://erddap.incois.gov.in/erddap"
+
+    search_result = ConnectorResult(
+        status="success",
+        data=[
+            {
+                "datasetID": "https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats.subset",
+                "url": "https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats.subset.html",
+            },
+        ],
+        source_status="live",
+    )
+
+    dataset_info = connector.select_observation_dataset(search_result)
+    assert dataset_info is not None
+    assert dataset_info["dataset_id"] == "Indian_ARGO_Floats.subset"
+    assert dataset_info["access_method"] == "tabledap"
+
+    dataset_id = dataset_info["dataset_id"]
+    normalized = connector._normalize_dataset_id(dataset_id)
+    assert normalized == "Indian_ARGO_Floats.subset"
+
+    url = f"{connector.base_url}/tabledap/{normalized}.json"
+    assert url == "https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats.subset.json"
+    assert url.count("https://erddap.incois.gov.in/erddap") == 1
