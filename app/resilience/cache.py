@@ -119,6 +119,16 @@ class MarineCache:
                 "active_entries": total - expired,
             }
 
+    async def get_entry(self, key: str) -> Optional[CacheEntry]:
+        async with self._lock:
+            entry = self._store.get(key)
+            if entry is None:
+                return None
+            if entry.is_expired():
+                del self._store[key]
+                return None
+            return entry
+
     async def get_entries(self, source: Optional[str] = None) -> list[dict[str, Any]]:
         async with self._lock:
             entries = []

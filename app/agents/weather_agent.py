@@ -2,14 +2,16 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from typing import Any, Optional
 
 from app.agents.base_agent import BaseAgent
 from app.connectors.incois_connector import IncoisConnector
+from app.resilience.cache import marine_cache
 from app.schemas.agent import AgentEvidence, AgentResultData
 from app.services import observations_service
+from app.config import settings
 
 logger = logging.getLogger("orca")
 
@@ -22,6 +24,10 @@ WHY_IT_MATTERS = {
     "air_temperature": "Air temperature affects crew comfort and equipment performance.",
     "humidity": "Humidity affects weather patterns and storm development.",
 }
+
+
+def _weather_cache_key(lat: float, lon: float, radius_km: float) -> str:
+    return f"incois:weather:{lat:.2f}:{lon:.2f}:{radius_km:.1f}"
 
 
 class WeatherAgent(BaseAgent):
@@ -101,6 +107,30 @@ class WeatherAgent(BaseAgent):
                             ]
                             source_status = normalized.source_status
                             errors.extend(normalized.errors)
+                            try:
+                                await marine_cache.set(
+                                    _weather_cache_key(lat, lon, radius_km),
+                                    [obs.__dict__ for obs in observations],
+                                    source="incois",
+                                    status="cached",
+                                    ttl_seconds=86400,
+                                )
+                            except Exception as exc:
+                                logger.warning("Failed to cache INCOIS weather data: %s", exc)
+
+        if not observations:
+            try:
+                cache_entry = await marine_cache.get_entry(_weather_cache_key(lat, lon, radius_km))
+                if cache_entry is not None and isinstance(cache_entry.value, list) and cache_entry.value:
+                    observations = [SimpleNamespace(**item) for item in cache_entry.value]
+                    age_seconds = (datetime.now(timezone.utc) - cache_entry.created_at).total_seconds()
+                    if age_seconds > settings.CACHE_STALE_THRESHOLD_SECONDS:
+                        source_status = "stale"
+                        errors.append("incois_weather_data_stale")
+                    else:
+                        source_status = "cached"
+            except Exception as exc:
+                logger.warning("Failed to retrieve cached INCOIS weather data: %s", exc)
 
         if not observations:
             return AgentResultData(

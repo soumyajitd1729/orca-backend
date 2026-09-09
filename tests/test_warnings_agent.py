@@ -4,7 +4,15 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.agents.warnings_agent import WarningsAgent
+from app.resilience.cache import marine_cache
 from app.schemas.agent import AgentResultData
+
+
+@pytest.fixture(autouse=True)
+async def _clear_warnings_cache():
+    await marine_cache.clear()
+    yield
+    await marine_cache.clear()
 
 
 class FakeWarning:
@@ -172,3 +180,102 @@ async def test_warnings_agent_evidence_generation(monkeypatch):
     assert result.result.evidence[0].variable == "warning"
     assert result.result.evidence[0].value == "storm"
     assert result.result.evidence[0].unit == "advisory"
+
+
+@pytest.mark.asyncio
+async def test_warnings_agent_uses_cache_when_imd_fails(monkeypatch):
+    from datetime import datetime, timezone, timedelta
+
+    cache_key = "imd:warnings:16.90:82.20:50.0"
+    warning_dict = {
+        "type": "cyclone",
+        "severity": "high",
+        "issued_by": "IMD",
+        "valid_from": datetime.now(timezone.utc).isoformat(),
+        "valid_to": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+    }
+    await marine_cache.set(cache_key, [warning_dict], source="imd", status="cached", ttl_seconds=86400)
+
+    async def fake_get_warnings(db, lat, lon, radius_km):
+        return []
+
+    async def fake_get_district_warnings(self):
+        from app.connectors.base_connector import ConnectorResult
+        return ConnectorResult(
+            status="error",
+            errors=["imd_error"],
+            source_status="unavailable",
+            retrieved_at=datetime.utcnow(),
+        )
+
+    monkeypatch.setattr(
+        "app.agents.warnings_agent.warnings_service.get_active_warnings_within_radius",
+        fake_get_warnings,
+    )
+    monkeypatch.setattr(
+        "app.connectors.imd_connector.ImdConnector.get_district_warnings",
+        fake_get_district_warnings,
+    )
+
+    agent = WarningsAgent(name="warnings")
+    db = AsyncMock()
+    result = await agent.run(db=db, lat=16.9, lon=82.2, radius_km=50.0)
+
+    assert result.result.status == "success"
+    assert len(result.result.data) == 1
+    assert result.result.source_status == "cached"
+    assert result.result.data[0]["type"] == "cyclone"
+
+
+@pytest.mark.asyncio
+async def test_warnings_agent_uses_stale_cache_when_imd_fails(monkeypatch):
+    from datetime import datetime, timezone, timedelta
+    from app.resilience.cache import CacheEntry
+
+    cache_key = "imd:warnings:16.90:82.20:50.0"
+    warning_dict = {
+        "type": "cyclone",
+        "severity": "high",
+        "issued_by": "IMD",
+        "valid_from": datetime.now(timezone.utc).isoformat(),
+        "valid_to": (datetime.now(timezone.utc) + timedelta(hours=1)).isoformat(),
+    }
+    old_entry = CacheEntry(
+        key=cache_key,
+        value=[warning_dict],
+        created_at=datetime.now(timezone.utc) - timedelta(seconds=7200),
+        source="imd",
+        status="cached",
+    )
+    marine_cache._store[cache_key] = old_entry
+
+    async def fake_get_warnings(db, lat, lon, radius_km):
+        return []
+
+    async def fake_get_district_warnings(self):
+        from app.connectors.base_connector import ConnectorResult
+        return ConnectorResult(
+            status="error",
+            errors=["imd_error"],
+            source_status="unavailable",
+            retrieved_at=datetime.utcnow(),
+        )
+
+    monkeypatch.setattr(
+        "app.agents.warnings_agent.warnings_service.get_active_warnings_within_radius",
+        fake_get_warnings,
+    )
+    monkeypatch.setattr(
+        "app.connectors.imd_connector.ImdConnector.get_district_warnings",
+        fake_get_district_warnings,
+    )
+
+    agent = WarningsAgent(name="warnings")
+    db = AsyncMock()
+    result = await agent.run(db=db, lat=16.9, lon=82.2, radius_km=50.0)
+
+    assert result.result.status == "success"
+    assert len(result.result.data) == 1
+    assert result.result.source_status == "stale"
+    assert "imd_warnings_stale" in result.result.errors
+    assert result.result.data[0]["type"] == "cyclone"

@@ -3,7 +3,15 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.agents.weather_agent import WeatherAgent
+from app.resilience.cache import marine_cache
 from app.schemas.agent import AgentResultData
+
+
+@pytest.fixture(autouse=True)
+async def _clear_weather_cache():
+    await marine_cache.clear()
+    yield
+    await marine_cache.clear()
 
 
 class FakeObservation:
@@ -108,3 +116,99 @@ async def test_weather_agent_evidence_generation(monkeypatch):
     assert result.result.evidence[0].unit == "m"
     assert result.result.evidence[0].confidence == 0.85
     assert "why_it_matters" in result.result.evidence[0].model_dump()
+
+
+@pytest.mark.asyncio
+async def test_weather_agent_uses_cache_when_incois_fails(monkeypatch):
+    from datetime import datetime, timezone
+    from app.resilience.cache import CacheEntry
+
+    cache_key = "incois:weather:16.90:82.20:10.0"
+    obs_dict = {
+        "variable": "temperature",
+        "value": 28.5,
+        "unit": "celsius",
+        "valid_time": datetime.now(timezone.utc).isoformat(),
+        "confidence": 0.9,
+        "source": "incois",
+    }
+    await marine_cache.set(
+        cache_key,
+        [obs_dict],
+        source="incois",
+        status="cached",
+        ttl_seconds=86400,
+    )
+
+    async def fake_get_observations(db, **kwargs):
+        return []
+
+    async def fake_search_datasets(*args, **kwargs):
+        from app.connectors.base_connector import ConnectorResult
+        return ConnectorResult(
+            status="error",
+            errors=["search_failed"],
+            source_status="unavailable",
+            retrieved_at=datetime.utcnow(),
+        )
+
+    monkeypatch.setattr("app.agents.weather_agent.observations_service.get_observations", fake_get_observations)
+    monkeypatch.setattr("app.connectors.incois_connector.IncoisConnector.search_datasets", fake_search_datasets)
+
+    agent = WeatherAgent(name="weather")
+    db = AsyncMock()
+    result = await agent.run(db=db, lat=16.9, lon=82.2, radius_km=10.0)
+
+    assert result.result.status == "success"
+    assert len(result.result.evidence) == 1
+    assert result.result.source_status == "cached"
+    assert result.result.evidence[0].value == 28.5
+
+
+@pytest.mark.asyncio
+async def test_weather_agent_uses_stale_cache_when_incois_fails(monkeypatch):
+    from datetime import datetime, timezone, timedelta
+
+    cache_key = "incois:weather:16.90:82.20:10.0"
+    obs_dict = {
+        "variable": "temperature",
+        "value": 28.5,
+        "unit": "celsius",
+        "valid_time": datetime.now(timezone.utc).isoformat(),
+        "confidence": 0.9,
+        "source": "incois",
+    }
+    from app.resilience.cache import CacheEntry
+    old_entry = CacheEntry(
+        key=cache_key,
+        value=[obs_dict],
+        created_at=datetime.now(timezone.utc) - timedelta(seconds=7200),
+        source="incois",
+        status="cached",
+    )
+    marine_cache._store[cache_key] = old_entry
+
+    async def fake_get_observations(db, **kwargs):
+        return []
+
+    async def fake_search_datasets(*args, **kwargs):
+        from app.connectors.base_connector import ConnectorResult
+        return ConnectorResult(
+            status="error",
+            errors=["search_failed"],
+            source_status="unavailable",
+            retrieved_at=datetime.utcnow(),
+        )
+
+    monkeypatch.setattr("app.agents.weather_agent.observations_service.get_observations", fake_get_observations)
+    monkeypatch.setattr("app.connectors.incois_connector.IncoisConnector.search_datasets", fake_search_datasets)
+
+    agent = WeatherAgent(name="weather")
+    db = AsyncMock()
+    result = await agent.run(db=db, lat=16.9, lon=82.2, radius_km=10.0)
+
+    assert result.result.status == "success"
+    assert len(result.result.evidence) == 1
+    assert result.result.source_status == "stale"
+    assert "incois_weather_data_stale" in result.result.errors
+    assert result.result.evidence[0].value == 28.5
