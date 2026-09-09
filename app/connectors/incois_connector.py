@@ -344,7 +344,7 @@ class IncoisConnector(BaseConnector):
             return ""
         if "/" in raw_id:
             raw_id = raw_id.rstrip("/").split("/")[-1]
-        return raw_id.replace(".html", "").replace(".json", "")
+        return raw_id.replace(".html", "").replace(".json", "").replace(".subset", "")
 
     def normalize_observations(
         self,
