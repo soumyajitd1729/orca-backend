@@ -2,15 +2,21 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.agents.base_agent import BaseAgent, AgentResult
 from app.connectors.imd_connector import ImdConnector
+from app.resilience.cache import marine_cache
 from app.schemas.agent import AgentEvidence, AgentResultData
 from app.services import warnings_service
+from app.config import settings
 
 logger = logging.getLogger("orca")
+
+
+def _warnings_cache_key(lat: float, lon: float, radius_km: float) -> str:
+    return f"imd:warnings:{lat:.2f}:{lon:.2f}:{radius_km:.1f}"
 
 
 class WarningsAgent(BaseAgent):
@@ -56,6 +62,30 @@ class WarningsAgent(BaseAgent):
                 warnings = connector_result.data
                 source_status = connector_result.source_status
                 errors.extend(connector_result.errors)
+                try:
+                    await marine_cache.set(
+                        _warnings_cache_key(lat, lon, radius_km),
+                        warnings,
+                        source="imd",
+                        status="cached",
+                        ttl_seconds=86400,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to cache IMD warnings: %s", exc)
+
+        if not warnings:
+            try:
+                cache_entry = await marine_cache.get_entry(_warnings_cache_key(lat, lon, radius_km))
+                if cache_entry is not None and isinstance(cache_entry.value, list) and cache_entry.value:
+                    warnings = cache_entry.value
+                    age_seconds = (datetime.now(timezone.utc) - cache_entry.created_at).total_seconds()
+                    if age_seconds > settings.CACHE_STALE_THRESHOLD_SECONDS:
+                        source_status = "stale"
+                        errors.append("imd_warnings_stale")
+                    else:
+                        source_status = "cached"
+            except Exception as exc:
+                logger.warning("Failed to retrieve cached IMD warnings: %s", exc)
 
         if not warnings:
             return AgentResultData(

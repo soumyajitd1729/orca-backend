@@ -2,15 +2,21 @@ from __future__ import annotations
 
 import logging
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Optional
 
 from app.agents.base_agent import BaseAgent, AgentResult
 from app.connectors.incois_connector import IncoisConnector
+from app.resilience.cache import marine_cache
 from app.schemas.agent import AgentEvidence, AgentResultData
 from app.services import pfz_service
+from app.config import settings
 
 logger = logging.getLogger("orca")
+
+
+def _pfz_cache_key(lat: float, lon: float, radius_km: float) -> str:
+    return f"incois:pfz:{lat:.2f}:{lon:.2f}:{radius_km:.1f}"
 
 
 class PFZAgent(BaseAgent):
@@ -32,6 +38,19 @@ class PFZAgent(BaseAgent):
             zones = await pfz_service.get_pfz_zones(lat, lon, radius_km, db)
             if zones:
                 source_status = "live"
+                try:
+                    await marine_cache.set(
+                        _pfz_cache_key(lat, lon, radius_km),
+                        [
+                            zone.model_dump() if hasattr(zone, "model_dump") else dict(zone)
+                            for zone in zones
+                        ],
+                        source="incois",
+                        status="cached",
+                        ttl_seconds=86400,
+                    )
+                except Exception as exc:
+                    logger.warning("Failed to cache PFZ zones: %s", exc)
         except Exception as exc:
             logger.warning("PFZAgent failed to fetch PFZ zones: %s", exc)
             return AgentResultData(
@@ -48,12 +67,18 @@ class PFZAgent(BaseAgent):
             )
 
         if not zones:
-            connector = IncoisConnector()
-            pfz_result = connector.normalize_pfz_unavailable(
-                reason="no_verified_machine_readable_api_for_pfz_scores"
-            )
-            errors.extend(pfz_result.errors)
-            source_status = pfz_result.source_status
+            try:
+                cache_entry = await marine_cache.get_entry(_pfz_cache_key(lat, lon, radius_km))
+                if cache_entry is not None and isinstance(cache_entry.value, list) and cache_entry.value:
+                    zones = cache_entry.value
+                    age_seconds = (datetime.now(timezone.utc) - cache_entry.created_at).total_seconds()
+                    if age_seconds > settings.CACHE_STALE_THRESHOLD_SECONDS:
+                        source_status = "stale"
+                        errors.append("pfz_data_stale")
+                    else:
+                        source_status = "cached"
+            except Exception as exc:
+                logger.warning("Failed to retrieve cached PFZ zones: %s", exc)
 
         if not zones:
             return AgentResultData(
