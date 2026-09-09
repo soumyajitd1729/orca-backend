@@ -417,7 +417,7 @@ def test_incois_select_observation_dataset_normalizes_full_url_dataset_id():
     )
     result = connector.select_observation_dataset(search_result)
     assert result is not None
-    assert result["dataset_id"] == "Indian_ARGO_Floats.subset"
+    assert result["dataset_id"] == "Indian_ARGO_Floats"
     assert result["access_method"] == "tabledap"
 
 
@@ -435,11 +435,11 @@ def test_incois_select_observation_dataset_normalizes_path_style_dataset_id():
     )
     result = connector.select_observation_dataset(search_result)
     assert result is not None
-    assert result["dataset_id"] == "Indian_ARGO_Floats.subset"
+    assert result["dataset_id"] == "Indian_ARGO_Floats"
 
 
 @pytest.mark.asyncio
-async def test_incois_query_dataset_does_not_double_concatenate_base_url():
+async def test_incois_query_dataset_regression_full_url_dataset_id():
     connector = IncoisConnector()
     connector.base_url = "https://erddap.incois.gov.in/erddap"
 
@@ -464,8 +464,48 @@ async def test_incois_query_dataset_does_not_double_concatenate_base_url():
         )
 
     called_url = mock_client.get.call_args[0][0]
-    assert called_url.startswith("https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats.subset.json")
+    assert called_url.startswith("https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats.json")
     assert called_url.count("https://erddap.incois.gov.in/erddap") == 1
+
+
+def test_incois_normalize_dataset_id_strips_subset_suffix():
+    connector = IncoisConnector()
+    assert connector._normalize_dataset_id("Indian_ARGO_Floats.subset") == "Indian_ARGO_Floats"
+    assert connector._normalize_dataset_id("Indian_ARGO_Floats") == "Indian_ARGO_Floats"
+    assert connector._normalize_dataset_id("https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats.subset") == "Indian_ARGO_Floats"
+    assert connector._normalize_dataset_id("/erddap/tabledap/Indian_ARGO_Floats.subset.html") == "Indian_ARGO_Floats"
+
+
+@pytest.mark.asyncio
+async def test_incois_argo_floats_subset_url_regression():
+    connector = IncoisConnector()
+    connector.base_url = "https://erddap.incois.gov.in/erddap"
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json = MagicMock(return_value={"table": {"rows": [], "columnNames": [], "columnUnits": []}})
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        await connector.query_dataset(
+            dataset_id="Indian_ARGO_Floats.subset",
+            variables=["TEMP", "PSAL"],
+            lat_min=10.0,
+            lat_max=11.0,
+            lon_min=20.0,
+            lon_max=21.0,
+        )
+
+    called_url = mock_client.get.call_args[0][0]
+    assert called_url.startswith("https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats.json?TEMP,PSAL")
+    assert ".subset" not in called_url
+    assert "&latitude>=10.0" in called_url
+    assert "&longitude>=20.0" in called_url
 
 
 @pytest.mark.asyncio
@@ -494,7 +534,7 @@ async def test_incois_query_griddap_does_not_double_concatenate_base_url():
         )
 
     called_url = mock_client.get.call_args[0][0]
-    assert called_url.startswith("https://erddap.incois.gov.in/erddap/griddap/Indian_ARGO_Floats.subset.json")
+    assert called_url.startswith("https://erddap.incois.gov.in/erddap/griddap/Indian_ARGO_Floats.json")
     assert called_url.count("https://erddap.incois.gov.in/erddap") == 1
 
 
@@ -515,15 +555,15 @@ def test_incois_end_to_end_production_url_bug():
 
     dataset_info = connector.select_observation_dataset(search_result)
     assert dataset_info is not None
-    assert dataset_info["dataset_id"] == "Indian_ARGO_Floats.subset"
+    assert dataset_info["dataset_id"] == "Indian_ARGO_Floats"
     assert dataset_info["access_method"] == "tabledap"
 
     dataset_id = dataset_info["dataset_id"]
     normalized = connector._normalize_dataset_id(dataset_id)
-    assert normalized == "Indian_ARGO_Floats.subset"
+    assert normalized == "Indian_ARGO_Floats"
 
     url = f"{connector.base_url}/tabledap/{normalized}.json"
-    assert url == "https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats.subset.json"
+    assert url == "https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats.json"
     assert url.count("https://erddap.incois.gov.in/erddap") == 1
 
 
@@ -553,7 +593,7 @@ async def test_incois_query_dataset_regression_full_url_dataset_id():
         )
 
     called_url = mock_client.get.call_args[0][0]
-    assert called_url.startswith("https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats.subset.json")
+    assert called_url.startswith("https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats.json")
     assert called_url.count("https://erddap.incois.gov.in/erddap") == 1
 
 
@@ -583,7 +623,7 @@ async def test_incois_query_griddap_regression_full_url_dataset_id():
         )
 
     called_url = mock_client.get.call_args[0][0]
-    assert called_url.startswith("https://erddap.incois.gov.in/erddap/griddap/Indian_ARGO_Floats.subset.json")
+    assert called_url.startswith("https://erddap.incois.gov.in/erddap/griddap/Indian_ARGO_Floats.json")
     assert called_url.count("https://erddap.incois.gov.in/erddap") == 1
 
 
@@ -613,5 +653,5 @@ async def test_incois_query_dataset_regression_full_url_dataset_id():
         )
 
     called_url = mock_client.get.call_args[0][0]
-    assert called_url.startswith("https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats.subset.json")
+    assert called_url.startswith("https://erddap.incois.gov.in/erddap/tabledap/Indian_ARGO_Floats.json")
     assert called_url.count("https://erddap.incois.gov.in/erddap") == 1
