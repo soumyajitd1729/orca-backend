@@ -4,7 +4,7 @@ import logging
 import uuid
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
-from typing import Any, Optional
+from typing import Optional
 
 from app.agents.base_agent import BaseAgent
 from app.config import settings
@@ -16,6 +16,7 @@ from app.schemas.agent import AgentEvidence, AgentResultData
 from app.services import observations_service
 
 logger = logging.getLogger("orca")
+
 
 WHY_IT_MATTERS = {
     "sst": "Sea surface temperature affects fish distribution and storm intensity.",
@@ -32,7 +33,11 @@ def _weather_cache_key(lat: float, lon: float, radius_km: float) -> str:
     return f"incois:weather:{lat:.2f}:{lon:.2f}:{radius_km:.1f}"
 
 
-def _prototype_weather_cache_key(lat: float, lon: float, radius_km: float) -> str:
+def _prototype_weather_cache_key(
+    lat: float,
+    lon: float,
+    radius_km: float,
+) -> str:
     return f"prototype:weather:{lat:.2f}:{lon:.2f}:{radius_km:.1f}"
 
 
@@ -60,10 +65,16 @@ class WeatherAgent(BaseAgent):
                 lon=lon,
                 radius_km=radius_km,
             )
+
             if observations:
                 source_status = "live"
+
         except Exception as exc:
-            logger.warning("WeatherAgent failed to fetch observations from DB: %s", exc)
+            logger.warning(
+                "WeatherAgent failed to fetch observations from DB: %s",
+                exc,
+            )
+
             return AgentResultData(
                 agent_name=self.name,
                 task_id=str(task_id),
@@ -79,20 +90,39 @@ class WeatherAgent(BaseAgent):
 
         if not observations:
             connector = IncoisConnector()
+
             search_result = await connector.search_datasets(
                 search_for=variables[0] if variables else "ocean"
             )
+
             if search_result.status == "success" and search_result.data:
-                dataset_info = connector.select_observation_dataset(search_result)
+                dataset_info = connector.select_observation_dataset(
+                    search_result
+                )
+
                 if dataset_info:
                     query_variables = []
+
                     for var in (variables or ["TEMP", "PSAL"]):
-                        query_variables.append(var.upper() if var.lower() in {"temp", "psal"} else var)
+                        query_variables.append(
+                            var.upper()
+                            if var.lower() in {"temp", "psal"}
+                            else var
+                        )
+
                     if not query_variables:
                         query_variables = ["TEMP", "PSAL"]
 
-                    query_method = connector.query_griddap if dataset_info["access_method"] == "griddap" else connector.query_dataset
-                    default_time_min = (datetime.utcnow() - timedelta(days=1095)).strftime("%Y-%m-%d")
+                    query_method = (
+                        connector.query_griddap
+                        if dataset_info["access_method"] == "griddap"
+                        else connector.query_dataset
+                    )
+
+                    default_time_min = (
+                        datetime.utcnow() - timedelta(days=1095)
+                    ).strftime("%Y-%m-%d")
+
                     query_result = await query_method(
                         dataset_id=dataset_info["dataset_id"],
                         variables=query_variables,
@@ -102,79 +132,180 @@ class WeatherAgent(BaseAgent):
                         lon_max=lon + radius_km / 111.0,
                         time_min=default_time_min,
                     )
-                    if query_result.status == "success" and query_result.data:
+
+                    if (
+                        query_result.status == "success"
+                        and query_result.data
+                    ):
                         normalized = connector.normalize_observations(
                             query_result.data,
-                            variable_mapping={"temp": "temperature", "psal": "salinity"},
+                            variable_mapping={
+                                "temp": "temperature",
+                                "psal": "salinity",
+                            },
                         )
+
                         if normalized.evidence:
                             observations = [
-                                SimpleNamespace(**ev.__dict__) for ev in normalized.evidence
+                                SimpleNamespace(**ev.__dict__)
+                                for ev in normalized.evidence
                             ]
+
                             source_status = normalized.source_status
                             errors.extend(normalized.errors)
+
                             try:
                                 await marine_cache.set(
-                                    _weather_cache_key(lat, lon, radius_km),
-                                    [obs.__dict__ for obs in observations],
+                                    _weather_cache_key(
+                                        lat,
+                                        lon,
+                                        radius_km,
+                                    ),
+                                    [
+                                        obs.__dict__
+                                        for obs in observations
+                                    ],
                                     source="incois",
                                     status="cached",
                                     ttl_seconds=86400,
                                 )
+
                             except Exception as exc:
-                                logger.warning("Failed to cache INCOIS weather data: %s", exc)
+                                logger.warning(
+                                    "Failed to cache INCOIS weather data: %s",
+                                    exc,
+                                )
 
         if not observations:
             try:
-                cache_entry = await marine_cache.get_entry(_weather_cache_key(lat, lon, radius_km))
-                if cache_entry is not None and isinstance(cache_entry.value, list) and cache_entry.value:
-                    observations = [SimpleNamespace(**item) for item in cache_entry.value]
-                    age_seconds = (datetime.now(timezone.utc) - cache_entry.created_at).total_seconds()
-                    if age_seconds > settings.CACHE_STALE_THRESHOLD_SECONDS:
+                cache_entry = await marine_cache.get_entry(
+                    _weather_cache_key(
+                        lat,
+                        lon,
+                        radius_km,
+                    )
+                )
+
+                if (
+                    cache_entry is not None
+                    and isinstance(cache_entry.value, list)
+                    and cache_entry.value
+                ):
+                    observations = [
+                        SimpleNamespace(**item)
+                        for item in cache_entry.value
+                    ]
+
+                    age_seconds = (
+                        datetime.now(timezone.utc)
+                        - cache_entry.created_at
+                    ).total_seconds()
+
+                    if (
+                        age_seconds
+                        > settings.CACHE_STALE_THRESHOLD_SECONDS
+                    ):
                         source_status = "stale"
                         errors.append("incois_weather_data_stale")
                     else:
                         source_status = "cached"
-            except Exception as exc:
-                logger.warning("Failed to retrieve cached INCOIS weather data: %s", exc)
 
-        if not observations and getattr(settings, "PROTOTYPE_WEATHER_API_URL", ""):
+            except Exception as exc:
+                logger.warning(
+                    "Failed to retrieve cached INCOIS weather data: %s",
+                    exc,
+                )
+
+        if (
+            not observations
+            and getattr(
+                settings,
+                "PROTOTYPE_WEATHER_API_URL",
+                "",
+            )
+        ):
             try:
                 proto_connector = PrototypeWeatherConnector()
-                proto_result = await proto_connector.fetch(lat=lat, lon=lon)
-                if proto_result.status == "success" and proto_result.evidence:
+
+                proto_result = await proto_connector.fetch(
+                    lat=lat,
+                    lon=lon,
+                )
+
+                if (
+                    proto_result.status == "success"
+                    and proto_result.evidence
+                ):
                     observations = [
-                        SimpleNamespace(**ev.__dict__) for ev in proto_result.evidence
+                        SimpleNamespace(**ev.__dict__)
+                        for ev in proto_result.evidence
                     ]
+
                     source_status = "prototype"
-                    errors.append("weather_data_from_prototype_fallback")
+                    errors.append(
+                        "weather_data_from_prototype_fallback"
+                    )
+
                     try:
                         await marine_cache.set(
-                            _prototype_weather_cache_key(lat, lon, radius_km),
-                            [obs.__dict__ for obs in observations],
+                            _prototype_weather_cache_key(
+                                lat,
+                                lon,
+                                radius_km,
+                            ),
+                            [
+                                obs.__dict__
+                                for obs in observations
+                            ],
                             source="prototype_weather",
                             status="cached",
                             ttl_seconds=86400,
                         )
-                    except Exception as exc:
-                        logger.warning("Failed to cache prototype weather data: %s", exc)
-            except Exception as exc:
-                logger.warning("Prototype weather fallback failed: %s", exc)
 
-        # Fallback to IMD Connector if DB, INCOIS, and Prototype yield no data
+                    except Exception as exc:
+                        logger.warning(
+                            "Failed to cache prototype weather data: %s",
+                            exc,
+                        )
+
+            except Exception as exc:
+                logger.warning(
+                    "Prototype weather fallback failed: %s",
+                    exc,
+                )
+
         if not observations:
             try:
                 imd_connector = ImdConnector()
-                imd_result = await imd_connector.get_current_weather(lat=lat, lon=lon)
-                if imd_result.status == "success" and imd_result.evidence:
+
+                imd_result = await imd_connector.get_current_weather(
+                    lat=lat,
+                    lon=lon,
+                )
+
+                if (
+                    imd_result.status == "success"
+                    and imd_result.evidence
+                ):
                     observations = [
-                        SimpleNamespace(**ev.__dict__) if hasattr(ev, "__dict__") else SimpleNamespace(**ev)
+                        (
+                            SimpleNamespace(**ev.__dict__)
+                            if hasattr(ev, "__dict__")
+                            else SimpleNamespace(**ev)
+                        )
                         for ev in imd_result.evidence
                     ]
+
                     source_status = "imd"
-                    errors.append("weather_data_from_imd_fallback")
+                    errors.append(
+                        "weather_data_from_imd_fallback"
+                    )
+
             except Exception as exc:
-                logger.warning("IMD weather fallback failed: %s", exc)
+                logger.warning(
+                    "IMD weather fallback failed: %s",
+                    exc,
+                )
 
         if not observations:
             return AgentResultData(
@@ -199,23 +330,38 @@ class WeatherAgent(BaseAgent):
             elif hasattr(obs, "__dict__"):
                 obs_dict = vars(obs)
             else:
-                obs_dict = dict(obs) if hasattr(obs, "keys") else {}
-            variable = (obs_dict.get("variable") or "").lower()
+                obs_dict = (
+                    dict(obs)
+                    if hasattr(obs, "keys")
+                    else {}
+                )
+
+            variable = (
+                obs_dict.get("variable") or ""
+            ).lower()
+
             evidence.append(
                 AgentEvidence(
                     source=obs_dict.get("source", "incois"),
                     variable=variable,
                     value=obs_dict.get("value"),
                     unit=obs_dict.get("unit"),
-                    valid_time=obs_dict.get("valid_time") or obs_dict.get("observed_at") or obs_dict.get("source_time"),
+                    valid_time=(
+                        obs_dict.get("valid_time")
+                        or obs_dict.get("observed_at")
+                        or obs_dict.get("source_time")
+                    ),
                     confidence=obs_dict.get("confidence"),
                     why_it_matters=WHY_IT_MATTERS.get(variable),
                 )
             )
+
             data.append(obs_dict)
 
         completed_at = datetime.utcnow()
-        duration_ms = (completed_at - started_at).total_seconds() * 1000
+        duration_ms = (
+            completed_at - started_at
+        ).total_seconds() * 1000
 
         return AgentResultData(
             agent_name=self.name,
@@ -228,5 +374,4 @@ class WeatherAgent(BaseAgent):
             completed_at=completed_at,
             duration_ms=round(duration_ms, 3),
             source_status=source_status,
-        )ce_status=source_status,
         )
