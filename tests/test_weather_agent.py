@@ -5,6 +5,7 @@ import pytest
 from app.agents.weather_agent import WeatherAgent
 from app.resilience.cache import marine_cache
 from app.schemas.agent import AgentResultData
+from datetime import datetime, timezone, timedelta
 
 
 @pytest.fixture(autouse=True)
@@ -212,3 +213,186 @@ async def test_weather_agent_uses_stale_cache_when_incois_fails(monkeypatch):
     assert result.result.source_status == "stale"
     assert "incois_weather_data_stale" in result.result.errors
     assert result.result.evidence[0].value == 28.5
+
+
+@pytest.mark.asyncio
+async def test_weather_agent_uses_prototype_fallback_when_incois_unavailable(monkeypatch):
+    monkeypatch.setattr("app.config.settings.PROTOTYPE_WEATHER_API_URL", "https://api.example.com/weather")
+
+    async def fake_get_observations(db, **kwargs):
+        return []
+
+    async def fake_search_datasets(*args, **kwargs):
+        from app.connectors.base_connector import ConnectorResult
+        return ConnectorResult(
+            status="error",
+            errors=["search_failed"],
+            source_status="unavailable",
+            retrieved_at=datetime.utcnow(),
+        )
+
+    async def fake_fetch(self, **kwargs):
+        from app.connectors.base_connector import ConnectorEvidence, ConnectorResult
+        return ConnectorResult(
+            status="success",
+            data={"temperature": 29.1, "wind_speed": 12.0},
+            evidence=[
+                ConnectorEvidence(
+                    source="prototype_weather",
+                    variable="air_temperature",
+                    value=29.1,
+                    unit="celsius",
+                    valid_time=datetime.utcnow(),
+                    confidence=0.5,
+                    why_it_matters="Air temperature affects crew comfort and equipment performance.",
+                    url_ref="https://api.example.com/weather",
+                ),
+                ConnectorEvidence(
+                    source="prototype_weather",
+                    variable="wind_speed",
+                    value=12.0,
+                    unit="kt",
+                    valid_time=datetime.utcnow(),
+                    confidence=0.5,
+                    why_it_matters="Wind speed affects sea state and vessel handling.",
+                    url_ref="https://api.example.com/weather",
+                ),
+            ],
+            source_status="prototype",
+            retrieved_at=datetime.utcnow(),
+        )
+
+    monkeypatch.setattr("app.agents.weather_agent.observations_service.get_observations", fake_get_observations)
+    monkeypatch.setattr("app.connectors.incois_connector.IncoisConnector.search_datasets", fake_search_datasets)
+    monkeypatch.setattr("app.connectors.prototype_weather_connector.PrototypeWeatherConnector.fetch", fake_fetch)
+
+    agent = WeatherAgent(name="weather")
+    db = AsyncMock()
+    result = await agent.run(db=db, lat=16.9, lon=82.2, radius_km=10.0)
+
+    assert result.result.status == "success"
+    assert len(result.result.evidence) == 2
+    assert result.result.source_status == "prototype"
+    assert "weather_data_from_prototype_fallback" in result.result.errors
+    variables = {ev.variable for ev in result.result.evidence}
+    assert "air_temperature" in variables
+    assert "wind_speed" in variables
+    for ev in result.result.evidence:
+        assert ev.source == "prototype_weather"
+        assert ev.confidence == 0.5
+
+
+@pytest.mark.asyncio
+async def test_weather_agent_prototype_fallback_unavailable_returns_no_data(monkeypatch):
+    monkeypatch.setattr("app.config.settings.PROTOTYPE_WEATHER_API_URL", "https://api.example.com/weather")
+
+    async def fake_get_observations(db, **kwargs):
+        return []
+
+    async def fake_search_datasets(*args, **kwargs):
+        from app.connectors.base_connector import ConnectorResult
+        return ConnectorResult(
+            status="error",
+            errors=["search_failed"],
+            source_status="unavailable",
+            retrieved_at=datetime.utcnow(),
+        )
+
+    async def fake_fetch(self, **kwargs):
+        from app.connectors.base_connector import ConnectorResult
+        return ConnectorResult(
+            status="error",
+            errors=["prototype_api_down"],
+            source_status="unavailable",
+            retrieved_at=datetime.utcnow(),
+        )
+
+    monkeypatch.setattr("app.agents.weather_agent.observations_service.get_observations", fake_get_observations)
+    monkeypatch.setattr("app.connectors.incois_connector.IncoisConnector.search_datasets", fake_search_datasets)
+    monkeypatch.setattr("app.connectors.prototype_weather_connector.PrototypeWeatherConnector.fetch", fake_fetch)
+
+    agent = WeatherAgent(name="weather")
+    db = AsyncMock()
+    result = await agent.run(db=db, lat=16.9, lon=82.2, radius_km=10.0)
+
+    assert result.result.status == "no_data"
+    assert result.result.evidence == []
+
+
+@pytest.mark.asyncio
+async def test_weather_agent_no_prototype_when_not_configured(monkeypatch):
+    monkeypatch.setattr("app.config.settings.PROTOTYPE_WEATHER_API_URL", "")
+
+    async def fake_get_observations(db, **kwargs):
+        return []
+
+    async def fake_search_datasets(*args, **kwargs):
+        from app.connectors.base_connector import ConnectorResult
+        return ConnectorResult(
+            status="error",
+            errors=["search_failed"],
+            source_status="unavailable",
+            retrieved_at=datetime.utcnow(),
+        )
+
+    monkeypatch.setattr("app.agents.weather_agent.observations_service.get_observations", fake_get_observations)
+    monkeypatch.setattr("app.connectors.incois_connector.IncoisConnector.search_datasets", fake_search_datasets)
+
+    agent = WeatherAgent(name="weather")
+    db = AsyncMock()
+    result = await agent.run(db=db, lat=16.9, lon=82.2, radius_km=10.0)
+
+    assert result.result.status == "no_data"
+    assert result.result.evidence == []
+
+
+@pytest.mark.asyncio
+async def test_weather_agent_prototype_does_not_present_as_incois(monkeypatch):
+    monkeypatch.setattr("app.config.settings.PROTOTYPE_WEATHER_API_URL", "https://api.example.com/weather")
+
+    async def fake_get_observations(db, **kwargs):
+        return []
+
+    async def fake_search_datasets(*args, **kwargs):
+        from app.connectors.base_connector import ConnectorResult
+        return ConnectorResult(
+            status="error",
+            errors=["search_failed"],
+            source_status="unavailable",
+            retrieved_at=datetime.utcnow(),
+        )
+
+    async def fake_fetch(self, **kwargs):
+        from app.connectors.base_connector import ConnectorEvidence, ConnectorResult
+        return ConnectorResult(
+            status="success",
+            data={"temperature": 29.1},
+            evidence=[
+                ConnectorEvidence(
+                    source="prototype_weather",
+                    variable="air_temperature",
+                    value=29.1,
+                    unit="celsius",
+                    valid_time=datetime.utcnow(),
+                    confidence=0.5,
+                    why_it_matters="Air temperature affects crew comfort and equipment performance.",
+                    url_ref="https://api.example.com/weather",
+                ),
+            ],
+            source_status="prototype",
+            retrieved_at=datetime.utcnow(),
+        )
+
+    monkeypatch.setattr("app.agents.weather_agent.observations_service.get_observations", fake_get_observations)
+    monkeypatch.setattr("app.connectors.incois_connector.IncoisConnector.search_datasets", fake_search_datasets)
+    monkeypatch.setattr("app.connectors.prototype_weather_connector.PrototypeWeatherConnector.fetch", fake_fetch)
+
+    agent = WeatherAgent(name="weather")
+    db = AsyncMock()
+    result = await agent.run(db=db, lat=16.9, lon=82.2, radius_km=10.0)
+
+    assert result.result.status == "success"
+    assert result.result.source_status == "prototype"
+    for ev in result.result.evidence:
+        assert ev.source == "prototype_weather"
+        assert ev.source != "incois"

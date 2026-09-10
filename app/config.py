@@ -20,6 +20,9 @@ class Settings(BaseSettings):
     MOSDAC_USERNAME: str = ""
     MOSDAC_PASSWORD: str = ""
 
+    PROTOTYPE_WEATHER_API_URL: str = ""
+    PROTOTYPE_WEATHER_API_KEY: str = ""
+
     GROQ_API_KEY: str = ""
     GROQ_MODEL: str = "openai/gpt-oss-120b"
     CHAT_TIMEOUT_SECONDS: float = 8.0
