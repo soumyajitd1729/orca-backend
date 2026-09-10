@@ -188,3 +188,52 @@ async def test_intent_agent_no_coordinate_hallucination_from_llm(monkeypatch):
     result = await agent.run(message="Where can I fish?", user_location="Kakinada")
     assert result.result.data["latitude"] == 16.9891
     assert result.result.data["longitude"] == 82.2475
+
+
+@pytest.mark.asyncio
+async def test_intent_agent_time_expression_tomorrow_morning(monkeypatch):
+    monkeypatch.setattr("app.agents.intent_agent.groq_client._api_key", "")
+    agent = IntentAgent(name="intent")
+    result = await agent.run(message="Is it safe to fish tomorrow morning?")
+    assert result.result.data["time_expression"] == "tomorrow_morning"
+    assert result.result.data["query_type"] == "fishing"
+
+
+@pytest.mark.asyncio
+async def test_intent_agent_time_expression_tomorrow_evening(monkeypatch):
+    monkeypatch.setattr("app.agents.intent_agent.groq_client._api_key", "")
+    agent = IntentAgent(name="intent")
+    result = await agent.run(message="Is it safe to fish tomorrow evening?")
+    assert result.result.data["time_expression"] == "tomorrow_evening"
+
+
+@pytest.mark.asyncio
+async def test_intent_agent_time_expression_tomorrow_afternoon(monkeypatch):
+    monkeypatch.setattr("app.agents.intent_agent.groq_client._api_key", "")
+    agent = IntentAgent(name="intent")
+    result = await agent.run(message="What about tomorrow afternoon?")
+    assert result.result.data["time_expression"] == "tomorrow_afternoon"
+
+
+@pytest.mark.asyncio
+async def test_intent_agent_time_expression_tomorrow(monkeypatch):
+    monkeypatch.setattr("app.agents.intent_agent.groq_client._api_key", "")
+    agent = IntentAgent(name="intent")
+    result = await agent.run(message="What will the weather be like tomorrow?")
+    assert result.result.data["time_expression"] == "tomorrow"
+
+
+@pytest.mark.asyncio
+async def test_intent_agent_time_expression_today(monkeypatch):
+    monkeypatch.setattr("app.agents.intent_agent.groq_client._api_key", "")
+    agent = IntentAgent(name="intent")
+    result = await agent.run(message="What is the weather today?")
+    assert result.result.data["time_expression"] == "today"
+
+
+@pytest.mark.asyncio
+async def test_intent_agent_time_expression_none_for_current_weather(monkeypatch):
+    monkeypatch.setattr("app.agents.intent_agent.groq_client._api_key", "")
+    agent = IntentAgent(name="intent")
+    result = await agent.run(message="What is the weather condition at my location?")
+    assert result.result.data["time_expression"] is None

@@ -74,34 +74,21 @@ class ImdConnector(BaseConnector):
         super().__init__(base_url=base_url)
         self.api_key = api_key or getattr(settings, "IMD_API_KEY", "") or ""
 
-    async def _fetch_data(self, endpoint: str, params: dict[str, Any] | None = None) -> Any:
+    async def _fetch_data(
+        self,
+        endpoint: str,
+        params: dict[str, Any] | None = None,
+        time_expression: str | None = None,
+    ) -> Any:
         import httpx
 
-        # Keyless fallback when IMD_API_KEY is missing
         if not self.api_key:
             logger.info("IMD_API_KEY missing. Using Open-Meteo fallback for %s.", endpoint)
 
             if endpoint in ("current_wx", "stationnowcast", "districtnowcast"):
-                try:
-                    lat = (params or {}).get("lat") or 19.0760
-                    lon = (params or {}).get("lon") or 72.8777
-                    om_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true"
-
-                    async with httpx.AsyncClient(timeout=self.timeout) as client:
-                        resp = await client.get(om_url)
-                        if resp.status_code == 200:
-                            cw = resp.json().get("current_weather", {})
-                            return {
-                                "data": [{
-                                    "CURR_TEMP": cw.get("temperature", 28.0),
-                                    "WIND_SPEED": cw.get("windspeed", 12.0),
-                                    "WIND_DIRECTION": cw.get("winddirection", 240.0),
-                                    "RH": 75.0,
-                                    "TIME": datetime.utcnow().isoformat()
-                                }]
-                            }
-                except Exception as exc:
-                    logger.warning("Open-Meteo fallback failed: %s", exc)
+                if time_expression and time_expression.startswith("tomorrow"):
+                    return await self._fetch_open_meteo_forecast(params, time_expression)
+                return await self._fetch_open_meteo_current(params)
 
             return {
                 "data": [{
@@ -120,6 +107,126 @@ class ImdConnector(BaseConnector):
             resp = await client.get(url, headers=headers, params=params)
             resp.raise_for_status()
             return resp.json()
+
+    async def _fetch_open_meteo_current(self, params: dict[str, Any] | None = None) -> Any:
+        import httpx
+
+        lat = (params or {}).get("lat") or 19.0760
+        lon = (params or {}).get("lon") or 72.8777
+        om_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true"
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await client.get(om_url)
+            resp.raise_for_status()
+            cw = resp.json().get("current_weather", {})
+            return {
+                "_source": "open_meteo",
+                "data": [{
+                    "CURR_TEMP": cw.get("temperature"),
+                    "WIND_SPEED": cw.get("windspeed"),
+                    "WIND_DIRECTION": cw.get("winddirection"),
+                    "RH": None,
+                    "TIME": datetime.utcnow().isoformat(),
+                }],
+            }
+
+    async def _fetch_open_meteo_forecast(
+        self,
+        params: dict[str, Any] | None = None,
+        time_expression: str | None = None,
+    ) -> Any:
+        import httpx
+
+        lat = (params or {}).get("lat") or 19.0760
+        lon = (params or {}).get("lon") or 72.8777
+
+        hourly_vars = [
+            "temperature_2m",
+            "relative_humidity_2m",
+            "windspeed_10m",
+            "winddirection_10m",
+            "weather_code",
+            "precipitation",
+        ]
+
+        om_url = (
+            f"https://api.open-meteo.com/v1/forecast"
+            f"?latitude={lat}&longitude={lon}"
+            f"&forecast_days=2"
+            f"&hourly={','.join(hourly_vars)}"
+        )
+
+        async with httpx.AsyncClient(timeout=self.timeout) as client:
+            resp = await client.get(om_url)
+            resp.raise_for_status()
+            payload = resp.json()
+
+        hourly = payload.get("hourly", {})
+        times = hourly.get("time", [])
+        if not times:
+            return {"_source": "open_meteo", "data": []}
+
+        target_indices = self._get_forecast_hours(time_expression, times)
+        if not target_indices:
+            return {"_source": "open_meteo", "data": []}
+
+        rows: list[dict[str, Any]] = []
+        for idx in target_indices:
+            row: dict[str, Any] = {
+                "TIME": times[idx],
+                "CURR_TEMP": self._safe_get(hourly, "temperature_2m", idx),
+                "RH": self._safe_get(hourly, "relative_humidity_2m", idx),
+                "WIND_SPEED": self._safe_get(hourly, "windspeed_10m", idx),
+                "WIND_DIRECTION": self._safe_get(hourly, "winddirection_10m", idx),
+                "WEATHER_CODE": self._safe_get(hourly, "weather_code", idx),
+                "PRECIPITATION": self._safe_get(hourly, "precipitation", idx),
+            }
+            rows.append(row)
+
+        return {"_source": "open_meteo", "data": rows}
+
+    @staticmethod
+    def _safe_get(hourly: dict[str, Any], key: str, idx: int) -> Any:
+        values = hourly.get(key)
+        if isinstance(values, list) and idx < len(values):
+            return values[idx]
+        return None
+
+    @staticmethod
+    def _get_forecast_hours(
+        time_expression: str | None,
+        hourly_times: list[str],
+    ) -> list[int]:
+        from datetime import datetime, timedelta
+
+        parsed: list[datetime | None] = []
+        for t in hourly_times:
+            try:
+                parsed.append(datetime.fromisoformat(t.replace("Z", "+00:00")))
+            except Exception:
+                parsed.append(None)
+
+        now = datetime.utcnow()
+        tomorrow = (now + timedelta(days=1)).date()
+
+        target_indices: list[int] = []
+        for i, dt in enumerate(parsed):
+            if dt is None or dt.date() != tomorrow:
+                continue
+
+            hour = dt.hour
+            expr = (time_expression or "").lower()
+
+            if expr == "tomorrow_morning" and 6 <= hour < 12:
+                target_indices.append(i)
+            elif expr == "tomorrow_afternoon" and 12 <= hour < 17:
+                target_indices.append(i)
+            elif expr == "tomorrow_evening" and 17 <= hour < 22:
+                target_indices.append(i)
+            elif expr == "tomorrow":
+                target_indices.append(i)
+
+        return target_indices
 
     async def get_port_warnings(self, port_id: str | None = None) -> ConnectorResult:
         params = {}
@@ -156,6 +263,7 @@ class ImdConnector(BaseConnector):
         station_id: str | None = None,
         lat: float | None = None,
         lon: float | None = None,
+        time_expression: str | None = None,
     ) -> ConnectorResult:
         params = {}
         if station_id:
@@ -164,7 +272,7 @@ class ImdConnector(BaseConnector):
             params["lat"] = lat
         if lon is not None:
             params["lon"] = lon
-        return await self._call_endpoint("current_wx", params, "current_weather")
+        return await self._call_endpoint("current_wx", params, "current_weather", time_expression=time_expression)
 
     async def get_district_nowcast(self, district_id: str | None = None) -> ConnectorResult:
         params = {}
@@ -183,9 +291,10 @@ class ImdConnector(BaseConnector):
         endpoint: str,
         params: dict[str, Any],
         variable_prefix: str,
+        time_expression: str | None = None,
     ) -> ConnectorResult:
         try:
-            raw = await self._fetch_data(endpoint, params)
+            raw = await self._fetch_data(endpoint, params, time_expression=time_expression)
             # Route weather observation endpoints to normalize_observations
             if endpoint in ("current_wx", "stationnowcast", "districtnowcast"):
                 return self.normalize_observations(raw)
@@ -236,6 +345,8 @@ class ImdConnector(BaseConnector):
         else:
             errors.append(f"unsupported_raw_type={type(raw).__name__}")
 
+        source = raw.get("_source", "imd") if isinstance(raw, dict) else "imd"
+
         for row in rows:
             if not isinstance(row, dict):
                 continue
@@ -282,7 +393,7 @@ class ImdConnector(BaseConnector):
 
             evidence.append(
                 ConnectorEvidence(
-                    source="imd",
+                    source=source,
                     variable=str(warning_type).lower().replace(" ", "_"),
                     value=str(warning_type),
                     unit="advisory",
@@ -328,6 +439,8 @@ class ImdConnector(BaseConnector):
         else:
             errors.append(f"unsupported_raw_type={type(raw).__name__}")
 
+        source = raw.get("_source", "imd") if isinstance(raw, dict) else "imd"
+
         IMD_VARIABLE_KEYS = {
             "CURR_TEMP": "temperature",
             "DEW_POINT_TEMP": "dew_point_temperature",
@@ -339,6 +452,7 @@ class ImdConnector(BaseConnector):
             "MAX_TEMP": "temperature",
             "WEATHER_CODE": "weather_code",
             "NEBULOSITY": "cloud_cover",
+            "PRECIPITATION": "rainfall",
         }
 
         for row in rows:
@@ -367,19 +481,25 @@ class ImdConnector(BaseConnector):
                     unit = "hPa"
                 elif "humidity" in variable:
                     unit = "percent"
+                elif variable == "rainfall":
+                    unit = "mm"
 
                 confidence = 0.9
 
                 evidence.append(
                     ConnectorEvidence(
-                        source="imd",
+                        source=source,
                         variable=variable,
                         value=value,
                         unit=unit or None,
                         valid_time=valid_time,
                         confidence=confidence,
                         why_it_matters=WHY_IT_MATTERS.get(variable),
-                        url_ref=IMD_API_REFERENCE,
+                        url_ref=(
+                            "https://api.open-meteo.com/v1/forecast"
+                            if source == "open_meteo"
+                            else IMD_API_REFERENCE
+                        ),
                     )
                 )
 

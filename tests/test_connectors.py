@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -236,7 +236,98 @@ def test_imd_connector_normalize_observations():
 
 
 @pytest.mark.asyncio
-async def test_connector_retry_on_timeout():
+async def test_imd_connector_open_meteo_current_weather_source_label():
+    connector = ImdConnector(api_key="")
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json = MagicMock(return_value={
+            "current_weather": {
+                "temperature": 26.4,
+                "windspeed": 12.0,
+                "winddirection": 180.0,
+            }
+        })
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        result = await connector.get_current_weather(lat=16.94, lon=82.24)
+
+    assert result.status == "success"
+    assert len(result.evidence) >= 1
+    assert result.source_status == "live"
+    for ev in result.evidence:
+        assert ev.source == "open_meteo"
+        assert ev.url_ref == "https://api.open-meteo.com/v1/forecast"
+
+
+@pytest.mark.asyncio
+async def test_imd_connector_open_meteo_forecast_tomorrow_morning():
+    connector = ImdConnector(api_key="")
+    tomorrow = (datetime.utcnow() + timedelta(days=1)).strftime("%Y-%m-%d")
+    hourly_times = [f"{tomorrow}T{hour:02d}:00" for hour in range(24)]
+    hourly_data = {
+        "time": hourly_times,
+        "temperature_2m": [25.0 + i * 0.5 for i in range(24)],
+        "relative_humidity_2m": [70 + i for i in range(24)],
+        "windspeed_10m": [10.0 + i * 0.2 for i in range(24)],
+        "winddirection_10m": [180.0 + i for i in range(24)],
+        "weather_code": [1 for _ in range(24)],
+        "precipitation": [0.0 for _ in range(24)],
+    }
+
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 200
+        mock_resp.raise_for_status = MagicMock()
+        mock_resp.json = MagicMock(return_value={"hourly": hourly_data})
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        result = await connector.get_current_weather(
+            lat=16.94, lon=82.24, time_expression="tomorrow_morning"
+        )
+
+    assert result.status == "success"
+    assert len(result.evidence) == 36
+    for ev in result.evidence:
+        assert ev.source == "open_meteo"
+        assert ev.valid_time is not None
+    variables = {e.variable for e in result.evidence}
+    assert "temperature" in variables
+    assert "humidity" in variables
+    assert "wind_speed" in variables
+    assert "wind_direction" in variables
+    assert "weather_code" in variables
+    assert "rainfall" in variables
+
+
+@pytest.mark.asyncio
+async def test_imd_connector_open_meteo_failure_returns_error():
+    connector = ImdConnector(api_key="")
+    with patch("httpx.AsyncClient") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_resp = MagicMock()
+        mock_resp.status_code = 500
+        mock_resp.raise_for_status = MagicMock(side_effect=httpx.HTTPStatusError("500", request=None, response=mock_resp))
+        mock_client.get = AsyncMock(return_value=mock_resp)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+
+        result = await connector.get_current_weather(lat=16.94, lon=82.24)
+
+    assert result.status == "error"
+    assert result.source_status == "unavailable"
+    for ev in result.evidence:
+        assert ev.source != "imd"
     class FlakyConnector(BaseConnector):
         async def _fetch_data(self, **kwargs):
             raise asyncio.TimeoutError()
