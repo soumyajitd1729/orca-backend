@@ -7,12 +7,13 @@ from types import SimpleNamespace
 from typing import Any, Optional
 
 from app.agents.base_agent import BaseAgent
+from app.config import settings
+from app.connectors.imd_connector import ImdConnector
 from app.connectors.incois_connector import IncoisConnector
 from app.connectors.prototype_weather_connector import PrototypeWeatherConnector
 from app.resilience.cache import marine_cache
 from app.schemas.agent import AgentEvidence, AgentResultData
 from app.services import observations_service
-from app.config import settings
 
 logger = logging.getLogger("orca")
 
@@ -160,6 +161,21 @@ class WeatherAgent(BaseAgent):
             except Exception as exc:
                 logger.warning("Prototype weather fallback failed: %s", exc)
 
+        # Fallback to IMD Connector if DB, INCOIS, and Prototype yield no data
+        if not observations:
+            try:
+                imd_connector = ImdConnector()
+                imd_result = await imd_connector.get_current_weather(lat=lat, lon=lon)
+                if imd_result.status == "success" and imd_result.evidence:
+                    observations = [
+                        SimpleNamespace(**ev.__dict__) if hasattr(ev, "__dict__") else SimpleNamespace(**ev)
+                        for ev in imd_result.evidence
+                    ]
+                    source_status = "imd"
+                    errors.append("weather_data_from_imd_fallback")
+            except Exception as exc:
+                logger.warning("IMD weather fallback failed: %s", exc)
+
         if not observations:
             return AgentResultData(
                 agent_name=self.name,
@@ -212,4 +228,5 @@ class WeatherAgent(BaseAgent):
             completed_at=completed_at,
             duration_ms=round(duration_ms, 3),
             source_status=source_status,
+        )ce_status=source_status,
         )
