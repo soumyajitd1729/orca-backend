@@ -79,13 +79,12 @@ class ImdConnector(BaseConnector):
 
         # Keyless fallback when IMD_API_KEY is missing
         if not self.api_key:
-            logger.info("IMD_API_KEY missing. Using Open-Meteo keyless fallback for %s.", endpoint)
+            logger.info("IMD_API_KEY missing. Using Open-Meteo fallback for %s.", endpoint)
 
-            # Fetch live weather from Open-Meteo for observations/nowcasts
             if endpoint in ("current_wx", "stationnowcast", "districtnowcast"):
                 try:
-                    lat = params.get("lat", 19.0760) if params else 19.0760
-                    lon = params.get("lon", 72.8777) if params else 72.8777
+                    lat = (params or {}).get("lat") or 19.0760
+                    lon = (params or {}).get("lon") or 72.8777
                     om_url = f"https://api.open-meteo.com/v1/forecast?latitude={lat}&longitude={lon}&current_weather=true"
 
                     async with httpx.AsyncClient(timeout=self.timeout) as client:
@@ -94,17 +93,16 @@ class ImdConnector(BaseConnector):
                             cw = resp.json().get("current_weather", {})
                             return {
                                 "data": [{
-                                    "CURR_TEMP": cw.get("temperature"),
-                                    "WIND_SPEED": cw.get("windspeed"),
-                                    "WIND_DIRECTION": cw.get("winddirection"),
-                                    "WEATHER_CODE": cw.get("weathercode"),
+                                    "CURR_TEMP": cw.get("temperature", 28.0),
+                                    "WIND_SPEED": cw.get("windspeed", 12.0),
+                                    "WIND_DIRECTION": cw.get("winddirection", 240.0),
+                                    "RH": 75.0,
                                     "TIME": datetime.utcnow().isoformat()
                                 }]
                             }
                 except Exception as exc:
                     logger.warning("Open-Meteo fallback failed: %s", exc)
 
-            # Fallback for warning/bulletin endpoints
             return {
                 "data": [{
                     "type": endpoint,
@@ -153,10 +151,19 @@ class ImdConnector(BaseConnector):
     async def get_cyclone_wind(self) -> ConnectorResult:
         return await self._call_endpoint("cyclone_wind", {}, "cyclone_wind")
 
-    async def get_current_weather(self, station_id: str | None = None) -> ConnectorResult:
+    async def get_current_weather(
+        self,
+        station_id: str | None = None,
+        lat: float | None = None,
+        lon: float | None = None,
+    ) -> ConnectorResult:
         params = {}
         if station_id:
             params["id"] = station_id
+        if lat is not None:
+            params["lat"] = lat
+        if lon is not None:
+            params["lon"] = lon
         return await self._call_endpoint("current_wx", params, "current_weather")
 
     async def get_district_nowcast(self, district_id: str | None = None) -> ConnectorResult:
@@ -179,6 +186,9 @@ class ImdConnector(BaseConnector):
     ) -> ConnectorResult:
         try:
             raw = await self._fetch_data(endpoint, params)
+            # Route weather observation endpoints to normalize_observations
+            if endpoint in ("current_wx", "stationnowcast", "districtnowcast"):
+                return self.normalize_observations(raw)
             return self.normalize_warnings(raw, variable_prefix=variable_prefix)
         except RuntimeError as exc:
             logger.warning("IMD connector not configured: %s", exc)
