@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from app.agents.base_agent import BaseAgent
 from app.connectors.incois_connector import IncoisConnector
+from app.connectors.prototype_weather_connector import PrototypeWeatherConnector
 from app.resilience.cache import marine_cache
 from app.schemas.agent import AgentEvidence, AgentResultData
 from app.services import observations_service
@@ -28,6 +29,10 @@ WHY_IT_MATTERS = {
 
 def _weather_cache_key(lat: float, lon: float, radius_km: float) -> str:
     return f"incois:weather:{lat:.2f}:{lon:.2f}:{radius_km:.1f}"
+
+
+def _prototype_weather_cache_key(lat: float, lon: float, radius_km: float) -> str:
+    return f"prototype:weather:{lat:.2f}:{lon:.2f}:{radius_km:.1f}"
 
 
 class WeatherAgent(BaseAgent):
@@ -131,6 +136,29 @@ class WeatherAgent(BaseAgent):
                         source_status = "cached"
             except Exception as exc:
                 logger.warning("Failed to retrieve cached INCOIS weather data: %s", exc)
+
+        if not observations and getattr(settings, "PROTOTYPE_WEATHER_API_URL", ""):
+            try:
+                proto_connector = PrototypeWeatherConnector()
+                proto_result = await proto_connector.fetch(lat=lat, lon=lon)
+                if proto_result.status == "success" and proto_result.evidence:
+                    observations = [
+                        SimpleNamespace(**ev.__dict__) for ev in proto_result.evidence
+                    ]
+                    source_status = "prototype"
+                    errors.append("weather_data_from_prototype_fallback")
+                    try:
+                        await marine_cache.set(
+                            _prototype_weather_cache_key(lat, lon, radius_km),
+                            [obs.__dict__ for obs in observations],
+                            source="prototype_weather",
+                            status="cached",
+                            ttl_seconds=86400,
+                        )
+                    except Exception as exc:
+                        logger.warning("Failed to cache prototype weather data: %s", exc)
+            except Exception as exc:
+                logger.warning("Prototype weather fallback failed: %s", exc)
 
         if not observations:
             return AgentResultData(
