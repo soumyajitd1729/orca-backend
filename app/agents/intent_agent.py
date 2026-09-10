@@ -162,6 +162,21 @@ class IntentAgent(BaseAgent):
         return None, None
 
     @staticmethod
+    def _parse_time_expression(message: str) -> Optional[str]:
+        msg_lower = message.lower()
+        if "tomorrow morning" in msg_lower:
+            return "tomorrow_morning"
+        if "tomorrow afternoon" in msg_lower:
+            return "tomorrow_afternoon"
+        if "tomorrow evening" in msg_lower:
+            return "tomorrow_evening"
+        if "tomorrow" in msg_lower:
+            return "tomorrow"
+        if "today" in msg_lower:
+            return "today"
+        return None
+
+    @staticmethod
     def _fallback_intent(
         message: str,
         user_location: Optional[str] = None,
@@ -197,7 +212,7 @@ class IntentAgent(BaseAgent):
         return {
             "query_type": query_type,
             "location_name": user_location,
-            "time_expression": None,
+            "time_expression": IntentAgent._parse_time_expression(message),
             "language": FALLBACK_LANGUAGE,
             "requested_radius_km": requested_radius_km,
             "route_start": None,

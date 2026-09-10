@@ -284,6 +284,7 @@ class Orchestrator:
             lat=intent_data.get("latitude") or 0.0,
             lon=intent_data.get("longitude") or 0.0,
             radius_km=intent_data.get("requested_radius_km") or 10.0,
+            time_expression=intent_data.get("time_expression"),
         )
 
     async def _run_pfz_agent(self, deps: dict[str, AgentResult]) -> AgentResult:

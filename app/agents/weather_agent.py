@@ -49,6 +49,7 @@ class WeatherAgent(BaseAgent):
         lon: float,
         radius_km: float = 10.0,
         variables: Optional[list[str]] = None,
+        time_expression: Optional[str] = None,
     ) -> AgentResultData:
         task_id = uuid.uuid4()
         started_at = datetime.utcnow()
@@ -281,6 +282,7 @@ class WeatherAgent(BaseAgent):
                 imd_result = await imd_connector.get_current_weather(
                     lat=lat,
                     lon=lon,
+                    time_expression=time_expression,
                 )
 
                 if (
@@ -296,7 +298,7 @@ class WeatherAgent(BaseAgent):
                         for ev in imd_result.evidence
                     ]
 
-                    source_status = "imd"
+                    source_status = imd_result.source_status
                     errors.append(
                         "weather_data_from_imd_fallback"
                     )

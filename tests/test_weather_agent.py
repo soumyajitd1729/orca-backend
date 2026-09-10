@@ -3,6 +3,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from app.agents.weather_agent import WeatherAgent
+from app.connectors.imd_connector import ImdConnector
 from app.resilience.cache import marine_cache
 from app.schemas.agent import AgentResultData
 from datetime import datetime, timezone, timedelta
@@ -396,3 +397,88 @@ async def test_weather_agent_prototype_does_not_present_as_incois(monkeypatch):
     for ev in result.result.evidence:
         assert ev.source == "prototype_weather"
         assert ev.source != "incois"
+
+
+@pytest.mark.asyncio
+async def test_weather_agent_passes_time_expression_to_imd_connector(monkeypatch):
+    async def fake_get_observations(db, **kwargs):
+        return []
+
+    async def fake_search_datasets(*args, **kwargs):
+        from app.connectors.base_connector import ConnectorResult
+        return ConnectorResult(
+            status="error",
+            errors=["search_failed"],
+            source_status="unavailable",
+            retrieved_at=datetime.utcnow(),
+        )
+
+    captured: dict[str, Any] = {}
+
+    async def fake_get_current_weather(self, lat=None, lon=None, time_expression=None):
+        captured["time_expression"] = time_expression
+        from app.connectors.base_connector import ConnectorResult, ConnectorEvidence
+        return ConnectorResult(
+            status="success",
+            evidence=[
+                ConnectorEvidence(
+                    source="open_meteo",
+                    variable="temperature",
+                    value=26.4,
+                    unit="celsius",
+                    valid_time=datetime.utcnow(),
+                    confidence=0.5,
+                    url_ref="https://api.open-meteo.com/v1/forecast",
+                ),
+            ],
+            source_status="live",
+            retrieved_at=datetime.utcnow(),
+        )
+
+    monkeypatch.setattr("app.agents.weather_agent.observations_service.get_observations", fake_get_observations)
+    monkeypatch.setattr("app.connectors.incois_connector.IncoisConnector.search_datasets", fake_search_datasets)
+
+    with patch.object(ImdConnector, "get_current_weather", fake_get_current_weather):
+        agent = WeatherAgent(name="weather")
+        db = AsyncMock()
+        result = await agent.run(db=db, lat=16.9, lon=82.2, radius_km=10.0, time_expression="tomorrow_morning")
+
+    assert captured["time_expression"] == "tomorrow_morning"
+    assert result.result.status == "success"
+    assert result.result.source_status == "live"
+    assert result.result.evidence[0].source == "open_meteo"
+
+
+@pytest.mark.asyncio
+async def test_weather_agent_open_meteo_failure_does_not_invent_data(monkeypatch):
+    async def fake_get_observations(db, **kwargs):
+        return []
+
+    async def fake_search_datasets(*args, **kwargs):
+        from app.connectors.base_connector import ConnectorResult
+        return ConnectorResult(
+            status="error",
+            errors=["search_failed"],
+            source_status="unavailable",
+            retrieved_at=datetime.utcnow(),
+        )
+
+    async def fake_get_current_weather(self, lat=None, lon=None, time_expression=None):
+        from app.connectors.base_connector import ConnectorResult
+        return ConnectorResult(
+            status="error",
+            errors=["open_meteo_down"],
+            source_status="unavailable",
+            retrieved_at=datetime.utcnow(),
+        )
+
+    monkeypatch.setattr("app.agents.weather_agent.observations_service.get_observations", fake_get_observations)
+    monkeypatch.setattr("app.connectors.incois_connector.IncoisConnector.search_datasets", fake_search_datasets)
+    monkeypatch.setattr("app.connectors.imd_connector.ImdConnector.get_current_weather", fake_get_current_weather)
+
+    agent = WeatherAgent(name="weather")
+    db = AsyncMock()
+    result = await agent.run(db=db, lat=16.9, lon=82.2, radius_km=10.0)
+
+    assert result.result.status == "no_data"
+    assert result.result.evidence == []
