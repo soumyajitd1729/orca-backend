@@ -7,6 +7,7 @@ from app.api.v1.observations import router as observations_router
 from app.api.v1.route import router as route_router
 from app.api.v1.layers import router as layers_router
 from app.api.v1.marine_point import router as marine_point_router
+from app.api.v1.debug import router as debug_router
 from app.envelope import build_envelope
 from app.api.v1 import auth, chat
 
@@ -19,6 +20,7 @@ router.include_router(observations_router)
 router.include_router(route_router)
 router.include_router(layers_router)
 router.include_router(marine_point_router)
+router.include_router(debug_router)
 router.include_router(auth.router, tags=["Auth"])
 router.include_router(chat.router, tags=["Chat"])
 
