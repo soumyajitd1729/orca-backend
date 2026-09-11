@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import date, datetime
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -13,6 +13,15 @@ class PFZQuery(BaseModel):
 class PFZZoneOut(BaseModel):
     id: str
     geometry: Optional[Any] = None
-    score: float
+    score: Optional[float] = None
     components: dict
     valid_time: datetime
+    source_type: Optional[str] = None
+    source_name: Optional[str] = None
+    sector: Optional[str] = None
+    landing_center: Optional[str] = None
+    depth: Optional[str] = None
+    distance_km: Optional[float] = None
+    direction: Optional[str] = None
+    forecast_date: Optional[date] = None
+    valid_until: Optional[date] = None
