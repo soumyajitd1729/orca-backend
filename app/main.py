@@ -15,30 +15,37 @@ logger = logging.getLogger("orca")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Local development (anything that is not PostgreSQL): apply schema and
-    # seed data sources so the app boots without Alembic/PostGIS. Production
-    # (PostgreSQL) relies on `alembic upgrade head` and must NOT auto-create
-    # tables here.
-    if "postgresql" not in settings.DATABASE_URL:
-        from app.db.base import Base
-        from app.db.session import AsyncSessionLocal, engine
-        from app.models.data_source_health import DataSourceHealth
-        from app.models.enums import SourceStatus
+    # Enable schema creation and auto-patching for both local and production environments
+    from app.db.base import Base
+    from app.db.session import AsyncSessionLocal, engine
+    from app.models.data_source_health import DataSourceHealth
+    from app.models.enums import SourceStatus
+    from sqlalchemy import text
 
-        async with engine.begin() as conn:
-            await conn.run_sync(Base.metadata.create_all)
-        async with AsyncSessionLocal() as session:
-            existing = (await session.execute(select(DataSourceHealth))).scalars().first()
-            if existing is None:
-                for name, priority in (("incois", 1), ("mosdac", 2), ("imd", 3)):
-                    session.add(
-                        DataSourceHealth(
-                            name=name, priority=priority, status=SourceStatus.unavailable
-                        )
+    async with engine.begin() as conn:
+        # Create tables if they don't exist yet
+        await conn.run_sync(Base.metadata.create_all)
+        
+        # Safely auto-patch missing columns in production without Alembic
+        try:
+            await conn.execute(
+                text("ALTER TABLE pfz_zones ADD COLUMN IF NOT EXISTS source_type VARCHAR;")
+            )
+        except Exception as e:
+            logger.warning(f"Note on auto-patching columns: {e}")
+
+    # Seed data source health if empty
+    async with AsyncSessionLocal() as session:
+        existing = (await session.execute(select(DataSourceHealth))).scalars().first()
+        if existing is None:
+            for name, priority in (("incois", 1), ("mosdac", 2), ("imd", 3)):
+                session.add(
+                    DataSourceHealth(
+                        name=name, priority=priority, status=SourceStatus.unavailable
                     )
-                await session.commit()
+                )
+            await session.commit()
     yield
-
 
 app = FastAPI(
     title="ORCA Backend",
