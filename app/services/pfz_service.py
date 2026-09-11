@@ -10,6 +10,15 @@ def _to_pfz_zone_out(row: PFZZone, geojson_str: str | None) -> PFZZoneOut:
         score=row.score,
         components=row.components or {},
         valid_time=row.valid_time,
+        source_type=row.source_type,
+        source_name=row.source_name,
+        sector=row.sector,
+        landing_center=row.landing_center,
+        depth=row.depth,
+        distance_km=row.distance_km,
+        direction=row.direction,
+        forecast_date=row.forecast_date,
+        valid_until=row.valid_until,
     )
 
 
