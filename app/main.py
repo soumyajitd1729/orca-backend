@@ -15,7 +15,6 @@ logger = logging.getLogger("orca")
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Enable schema creation and auto-patching for both local and production environments
     from app.db.base import Base
     from app.db.session import AsyncSessionLocal, engine
     from app.models.data_source_health import DataSourceHealth
@@ -23,16 +22,11 @@ async def lifespan(app: FastAPI):
     from sqlalchemy import text
 
     async with engine.begin() as conn:
-        # Create tables if they don't exist yet
-        await conn.run_sync(Base.metadata.create_all)
+        # OPTIONAL TEMPORARY FIX: Drop the outdated table so it gets recreated properly with all columns
+        await conn.execute(text("DROP TABLE IF EXISTS pfz_zones CASCADE;"))
         
-        # Safely auto-patch missing columns in production without Alembic
-        try:
-            await conn.execute(
-                text("ALTER TABLE pfz_zones ADD COLUMN IF NOT EXISTS source_type VARCHAR;")
-            )
-        except Exception as e:
-            logger.warning(f"Note on auto-patching columns: {e}")
+        # Create all tables (including pfz_zones with the correct schema)
+        await conn.run_sync(Base.metadata.create_all)
 
     # Seed data source health if empty
     async with AsyncSessionLocal() as session:
